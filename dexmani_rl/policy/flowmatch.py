@@ -1,4 +1,4 @@
-"""Frozen FlowMatch with uniform Euler integration from noise (0) to action (1)."""
+"""FlowMatch with uniform Euler integration from noise (0) to action (1)."""
 from __future__ import annotations
 
 from typing import Literal
@@ -15,7 +15,6 @@ class RectifiedFlow(nn.Module):
         self.model = model
         self.num_inference_steps = num_inference_steps
 
-    @torch.no_grad()
     def predict_action(self, cond, action_shape, inference_steps=None, *, generator=None, initial_noise=None):
         steps = self.num_inference_steps if inference_steps is None else inference_steps
         if type(steps) is not int or steps <= 0:
@@ -108,7 +107,6 @@ class FlowMatch(nn.Module):
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
 
-    @torch.no_grad()
     def encode_observations(self, obs):
         values = {}
         for key, value in obs.items():
@@ -119,7 +117,6 @@ class FlowMatch(nn.Module):
             values[key] = value.flatten(0, 1)
         return self.obs_encoder(values)
 
-    @torch.no_grad()
     def decode_condition(self, condition, initial_noise=None, inference_steps=None, generator=None):
         """Decode the normalized future window, excluding observation history."""
         prediction = self.action_decoder.predict_action(

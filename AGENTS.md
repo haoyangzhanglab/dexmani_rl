@@ -6,7 +6,7 @@
 
 ## 项目入口与上下文
 
-- 当前实现包括冻结 FlowMatch 的 DSRL-NA、RFS-PPO，以及冻结观察编码器、微调 decoder 的 RoboFFT-F，使用 `dexmani_sim` 交互；训练入口为 `dexmani_rl.train_dsrl`、`dexmani_rl.train_rfs`、`dexmani_rl.train_robofft`，共用 `dexmani_rl.evaluate`，配置在 `configs/`，验证命令见 `README.md`。
+- 当前实现包括 DSRL-NA、RFS-PPO、RoboFFT-F 和 BORA–FlowMatch，训练入口依次为 `dexmani_rl.train_dsrl`、`dexmani_rl.train_rfs`、`dexmani_rl.train_robofft` 和 `dexmani_rl.train_bora`。BORA 先读取 HDF5 示教做离线更新，再冻结策略做在线残差学习。四种方法共用 `dexmani_sim` 和 `dexmani_rl.evaluate`，配置在 `configs/`，验证命令见 `README.md`。
 - 引入实现时，同步记录实际环境、训练、评估和验证命令；不要编造路径或命令，也不要提前搭建空框架。
 - 按需阅读相关实现、调用方、配置和文档；先用 `rg` 定位，避免全量加载无关文件、日志和数据。
 - 相邻的 `../dexmani_policy` 是预训练策略及协作规范的参考仓库。需要对接时先检查其实际接口；跨仓库修改须在当前任务授权范围内，不直接复制其依赖或硬编码机器路径。

@@ -38,6 +38,18 @@ def policy_dimensions(policy):
             policy.n_action_steps * policy.action_dim)
 
 
+def joint_targets(window, normalizer, limits):
+    """Return requested and executable joint targets in radians."""
+    requested = normalizer.unnormalize(window)
+    return requested, requested.clamp(limits[:, 0], limits[:, 1])
+
+
+def executable_actions(window, normalizer, limits):
+    """Express the command the robot can execute in the critic's training coordinates."""
+    _, applied = joint_targets(window, normalizer, limits)
+    return normalizer.normalize(applied)
+
+
 class FrozenPolicy:
     def __init__(self, policy, cfg, limits, decode_batch=64):
         self.policy, self.cfg, self.decode_batch = policy, cfg, decode_batch
@@ -65,7 +77,7 @@ class FrozenPolicy:
         normalized = torch.cat(chunks)
         if residual is not None:
             normalized = normalized + residual.reshape_as(normalized)
-        physical, clipped = self._clip_physical(normalized)
+        physical, clipped = joint_targets(normalized, self.policy.normalizer['action'], self.limits)
         actions = self.policy.normalizer['action'].normalize(clipped).flatten(1)
         if return_clip_fraction:
             return actions, (physical != clipped).float().mean()
@@ -76,12 +88,12 @@ class FrozenPolicy:
         """Convert the execution window without changing the full matching sample."""
         start = self.policy.n_obs_steps - 1
         window = normalized[:, start:start + self.policy.n_action_steps]
-        physical, clipped = self._clip_physical(window)
+        physical, clipped = joint_targets(window, self.policy.normalizer['action'], self.limits)
         return clipped, (physical != clipped).float().mean()
 
-    def _clip_physical(self, normalized):
-        physical = self.policy.normalizer['action'].unnormalize(normalized)
-        return physical, physical.clamp(self.limits[:, 0], self.limits[:, 1])
+    def bounded_physical(self, window):
+        """Map a normalized execution window to joint targets in radians."""
+        return joint_targets(window, self.policy.normalizer['action'], self.limits)[1]
 
     def physical(self, actions):
         return self.policy.normalizer['action'].unnormalize(actions.reshape(-1, self.policy.n_action_steps, self.policy.action_dim))

@@ -1,0 +1,42 @@
+# BORA v2 with a FlowMatch action expert. Counts are optimizer batches or episodes.
+seed: 42
+offline_updates: 70000
+bc_warmup_updates: 40000
+offline_batch_size: 8
+episodes_per_round: 10
+updates_per_episode: 750
+online_batch_size: 64
+save_interval: 1000
+
+hidden_dim: 256
+encoder_lr: 0.00001
+decoder_lr: 0.00005
+critic_lr: 0.0001
+residual_lr: 0.0001
+weight_decay: 0.0001
+gamma: 0.99
+expectile: 0.7
+gae_lambda: 0.95
+policy_std: 1.0
+ppo_clip: 0.2
+ppo_weight: 0.01
+ppo_epochs: 2
+advantage_gate: 0.0
+target_tau: 0.005
+blend_start: 0.2
+blend_end: 0.75
+blend_steps: 4000
+bc_start: 2.0
+bc_end: 1.0
+bc_steps: 10000
+hinge_weight: 0.35
+margin: 0.0
+residual_l2: 0.0002
+
+# Local event magnitudes, in reward units per control frame.
+rewards:
+  time_penalty: -0.01
+  success_reward: 1.0
+  takeover_penalty: -0.25
+  recovery_reward: 0.25
+intervention_blend: 0.5

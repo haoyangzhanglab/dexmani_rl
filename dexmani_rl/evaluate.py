@@ -2,6 +2,7 @@ import argparse
 import json
 import time
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from pickle import UnpicklingError
 import numpy as np
@@ -12,6 +13,13 @@ from .env import make_env, seed_split
 from .dsrl import Actor as DSRLActor
 from .rfs import Actor as RFSActor
 from .robofft import RoboFFTActor
+from .bora import BORAActor
+
+
+@dataclass(frozen=True)
+class BORAStage:
+    actor: BORAActor
+    round_number: int
 
 
 @torch.no_grad()
@@ -24,14 +32,18 @@ def rollout(env, base, seed, actor, noise_magnitude, deadline):
     robofft = isinstance(actor, RoboFFTActor)
     normalized_clips, physical_clips = [], []
     while time.monotonic() < deadline:
-        context, state = base.encode(obs)
-        if robofft:
+        if isinstance(actor, BORAStage):
+            window = actor.actor.normalized_actions(obs, generator=generator, stage=actor.round_number)
+            actions = base.bounded_physical(window)[0].cpu().numpy()
+        elif robofft:
+            context, _ = base.encode(obs)
             normalized, fraction = actor.sample(context, generator, eval_mode=True, return_clip_fraction=True)
             physical, physical_fraction = base.robofft_actions(normalized)
             actions = physical[0].cpu().numpy()
             normalized_clips.append(fraction.item())
             physical_clips.append(physical_fraction.item())
         else:
+            context, state = base.encode(obs)
             residual = None
             if actor is None:
                 w = torch.randn(1, base.noise_dim, device=base.device, generator=generator)
@@ -111,7 +123,7 @@ def main():
     if args.rl_checkpoint:
         if args.weights:
             parser.error('--rl-checkpoint uses the saved base policy and weight selection')
-        actor_error = '--rl-checkpoint requires a saved RL actor (best.pt or last.pt)'
+        actor_error = '--rl-checkpoint requires a saved RL actor'
         try:
             saved = torch.load(args.rl_checkpoint, map_location='cpu', weights_only=True)
         except UnpicklingError as error:
@@ -119,7 +131,7 @@ def main():
         if not isinstance(saved, dict) or 'algorithm' not in saved or 'actor' not in saved:
             raise ValueError(actor_error)
         algorithm = saved['algorithm']
-        if algorithm not in ('dsrl', 'rfs', 'robofft'):
+        if algorithm not in ('dsrl', 'rfs', 'robofft', 'bora'):
             raise ValueError(f'Unsupported RL algorithm: {algorithm!r}')
         checkpoint, weights = saved['base_checkpoint'], saved['weights']
     else:
@@ -135,7 +147,15 @@ def main():
         seeds = seeds[:args.episodes]
     policies = {'baseline': None}
     noise_magnitude = None
-    if args.rl_checkpoint:
+    if algorithm == 'bora':
+        bora = BORAActor(deepcopy(policy), cfg, saved['config'])
+        bora.load_state_dict(saved['actor'])
+        bora.eval()
+        round_number = int(bora.round_number)
+        if round_number:
+            policies['offline'] = BORAStage(bora, 0)
+        policies['steered'] = BORAStage(bora, round_number)
+    elif args.rl_checkpoint:
         actor_cfg = saved['config']
         if algorithm == 'robofft':
             actor = RoboFFTActor(policy.action_decoder.model, policy.horizon, policy.action_dim,
@@ -163,6 +183,11 @@ def main():
         result.update(sampler_baseline=results['sampler_baseline'],
                       selected_iteration=saved['iteration'], selected_actor_updates=saved['actor_updates'],
                       comparison_vs_sampler=compare(results['sampler_baseline'], steered))
+    if algorithm == 'bora':
+        result['round'] = round_number
+        if 'offline' in results:
+            result.update(offline=results['offline'], comparison_offline_vs_bc=compare(baseline, results['offline']),
+                          comparison_vs_offline=compare(results['offline'], steered))
     output.parent.mkdir(parents=True, exist_ok=True)
     report = json.dumps(result, indent=2)
     with output.open('x') as file:

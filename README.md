@@ -1,6 +1,6 @@
 # DexMani RL
 
-本仓库在 `dexmani_sim` 中研究 FlowMatch 的在线后训练。DSRL-NA 学习初始噪声，RFS-PPO 联合学习初始噪声与动作残差，RoboFFT-F 直接微调 action decoder。三者均冻结视觉编码器和 normalizer，使用 FP32。DSRL 和 RFS 也冻结 decoder。当前尚缺真实预训练 BC checkpoint，未验证成功率提升。
+本仓库在 `dexmani_sim` 中研究 FlowMatch 后训练。DSRL-NA 学习初始噪声，RFS-PPO 联合学习初始噪声与动作残差，RoboFFT-F 微调 action decoder。这三种方法均冻结视觉编码器。BORA 从离线示教联合学习策略和逐动作价值，再冻结离线策略进行两轮在线残差学习。四种方法均使用 checkpoint 的 normalizer 和 FP32。当前的集成验证使用测试权重，任务级预训练 BC 的成功率实验待验证。
 
 ## 来源与结构
 
@@ -17,6 +17,7 @@
 | `env.py` | 仿真生命周期、观测历史和动作块执行 |
 | `base_policy.py` | BC 加载、冻结特征、动作映射与策略维度 |
 | `replay.py` | DSRL 的 CPU float32 replay |
+| `bora.py`、`bora_data.py`、`train_bora.py` | BORA 的更新方程、逐帧 HDF5 数据和两阶段训练循环 |
 | `checkpoint.py` | 原子保存和训练 RNG 状态 |
 
 `policy/` 包含 FlowMatch、DiTX、观测编码器、点云、视觉、融合、归一化及预处理模块。标准/factorized DiTX、DINO/DINOv3/SigLIP 和 LoRA 的 checkpoint 权重名称与配置保持支持。DSRL 的优化器按 `actor`、`critic`、`noise_critic`、`alpha` 命名保存。RFS 只接收状态、噪声、动作维度与配置/device，不持有基础策略。
@@ -60,7 +61,7 @@ DSRL 的 log-prob 在 tanh 后的 `u` 空间计算，含变换修正，target en
 
 RFS 在归一化动作空间合成 `a_norm = FM_norm(context,w) + 0.1*u_r`，再反归一化并按机器人关节限位裁剪。`0.1` 不是弧度，示教区间 `[-1,1]` 也不是硬限位。PPO 的 log-prob、ratio 始终在原始联合采样 `[w,u_r]` 上沿全部维度求和，不对物理动作计算概率。使用整轮 advantage 归一化、clipped surrogate 和价值 MSE。flow 只参与采集，无梯度，value 不裁剪。
 
-完整 flow 噪声为 `[B,H,19]`，通常 H=16。从 `n_obs_steps-1` 开始执行 K=8 个动作，具体窗口和控制周期沿用 BC 配置，Euler 时间方向为0→1。三种算法共享动作块时间尺度。
+完整 flow 噪声为 `[B,H,19]`，通常 H=16。从 `n_obs_steps-1` 开始执行 K=8 个动作，具体窗口和控制周期沿用 BC 配置，Euler 时间方向为0→1。DSRL、RFS 和 RoboFFT 共享下述动作块时间尺度。
 
 - `total_steps`、`warmup_steps` 和日志 `steps` 是实际执行的控制步。`rollout_steps`、日志 `chunks`、gamma 和 GAE 的一步是一个动作块。
 - 每控制步奖励为 `float(info['success'])`，采用成功保持判定。块内奖励求和，每块折扣一次，不用 `gamma**K`。
@@ -92,7 +93,46 @@ RoboFFT-F 采用官方提交 `a9ca8c8fc7684fc4718b2b7758bcc992eb710e46` 的 Can-
 
 本地适配包括冻结多模态编码器、DiTX actor、critic输入、单环境batch规模、按BC窗口执行，以及正确处理timeout与环境重置。没有引入anchor、BC regularization、熵或noise network。归一化采样裁剪与机器人关节限位分别记录，logp饱和也单独记录。饱和造成零梯度时不会自动改变算法。
 
-## 训练、恢复与评估
+## BORA–FlowMatch
+
+BORA 按结果页对应的五任务论文 v2 移植到 xArm7 + XHand 仿真。作者仓库公开了论文、图表和视频；训练代码、五任务轨迹和 BORA 专用权重未在该快照发布。网页的 86%（标准物体）和 70%（未见物体）来自作者的真机评估。这里保留 FlowMatch、原始 BC 基线和本地任务的成功判据。[结果页](https://chenzhongxi-sjtu.github.io/BORA/bora_results.html) · [论文 v2](https://arxiv.org/html/2605.30226v2) · [作者仓库快照](https://github.com/ChenZhongxi-sjtu/BORA/tree/b8cdf0c915f6885c8ef537dc9d0088468f9ad1f4)
+
+**离线。** 直接从 HDF5 读取同一控制帧的观测和将要执行的绝对关节目标。示教与采集数据共用滑动窗口。每个相对位置通过可学习的查询汇聚观测 tokens，Q 额外读取该位置的动作。Q 的 TD target 在窗内移到下一位置，完整窗口的末项使用相邻控制帧的第一个 V。成功或失败的终止动作参与训练，后续动作屏蔽。纯超时使用真实末观测 bootstrap。Q 的 Bellman 残差、V 的 expectile 和 actor 损失均按每个窗口的有效步数取均值，再平均整个 batch。
+
+先做动作 BC 和 critic 更新，再加入逐动作 clipped PPO。使用停止梯度的 Q−V 向窗内前序位置递推优势。原始优势过门限后，归一化并裁剪到 ±2。现有 DiTX 在完整 horizon 上执行可微 Euler 积分，积分步数来自 checkpoint。每个控制步以解码结果为均值、固定标准差的对角 Gaussian 对示教动作打分，沿 19 个关节求和。每个 batch 固定 flow 初始噪声及更新前的 log-prob，此条件 Gaussian 是 FlowMatch 的代理分布。离线训练更新 decoder 和观测编码器，RGB 主干遵循 checkpoint 的 `freeze/full/lora` 设置，保持 `eval()` 关闭 dropout。原论文使用少步 Consistency Policy 与 VLM tokens。[论文方法与附录 A、B](https://arxiv.org/html/2605.30226v2#S3) · [Consistency Policy](https://consistency-policy.github.io/)
+
+PPO 根据优势符号在 log 空间选择相应的裁剪边界，再计算带优势权重的目标值。日志的 `mean_log_ratio` 记录有效位置上的平均 log-ratio。每次 AdamW 写入前检查损失与梯度的有限性。
+
+**在线。** 冻结离线 actor，继承 Q/V。残差 MLP 输入 token 均值、当前关节状态和基底动作块。第一轮修正离线策略，第二轮以第一轮冻结的组合策略及其实际混合系数为基底。每条轨迹采集结束后，从示教和累计在线轨迹各采半个 batch 更新 critic 与当前残差。
+
+保守改进项 `relu(Q_base + margin − Q_final)` 的两个候选动作都经过与仿真执行相同的弧度转换和关节限位，再归一化给 Q 打分。默认 margin 为零，两个候选动作产生相同命令时，该项为零。BC 用 replay 的实际执行动作监督限位前的预测，使越界时仍有指向可行目标的梯度。残差自身受 L2 约束。跨轮更新采用 v2 Algorithm 1，三项损失采用 v3 式 (6)。v2 表 3 另列出 critic regularization 和 actor anchor 的系数，缺少对应定义。[v2 Algorithm 1](https://arxiv.org/html/2605.30226v2#A2.SS4) · [v3 在线目标](https://arxiv.org/html/2605.30226v3#S3.SS3)
+
+| 配方 | 数值及单位 |
+| --- | --- |
+| 离线更新 | 70,000 个 batch，前 40,000 个只对 actor 做 BC。单卡 batch 8 |
+| 在线更新 | 两轮，每轮 10 条轨迹，每条完成后 750 个混合 batch，batch 64 |
+| 本地选择 | expectile 0.7，GAE λ 0.95，Gaussian 标准差 1（归一化关节空间），PPO clip 0.2，每批 2 次 actor 更新 |
+| 在线调度 | 每轮从更新 0 起计。残差混合系数 0.2→0.75 / 4,000 步，BC 系数 2→1 / 10,000 步 |
+| 仿真奖励 | 每控制帧 −0.01，成功终止 +1，首次接管 −0.25，操作员确认恢复 +0.25 |
+
+默认自主采集。接入人工控制时，从 Python 调用 `dexmani_rl.train_bora.main(correction=choose_target, confirm_recovery=confirm)`，命令行参数与模块入口相同。
+
+- 执行前调用 `choose_target(raw_obs, proposed_joint_target)`。返回人工关节目标（弧度）表示接管，返回 `None` 表示自主执行。
+- 人工指令执行后调用 `confirm(next_raw_obs, terminated, truncated, info)`。返回 `True` 时，将恢复奖励记在刚执行的动作上。每段连续接管最多记一次，成功、失败与超时的最后一步均可确认。省略该回调时只记录接管。
+
+在 `policy` 环境运行。训练默认读取 `dexmani_sim.DATA_DIR/episodes/<checkpoint任务>/succeeded_episode`；也可传 `--demonstrations` 指向含 `episode_*.h5` 的目录。训练排除整个评估 seed 池。以下示例分两次运行同一配方，默认 `--through round2` 可一次跑完。
+
+```bash
+python -m dexmani_rl.train_bora --checkpoint PATH_TO_BC.pt --config configs/bora.yaml --through round1 --output runs/bora_round1
+python -m dexmani_rl.train_bora --resume runs/bora_round1/resume.pt --output runs/bora_round2
+python -m dexmani_rl.evaluate --rl-checkpoint runs/bora_round2/last.pt --episodes 100 --output runs/bora_comparison.json
+```
+
+`--through offline` 可单独训练离线策略。`offline.pt` 和 `last.pt` 用于独立评估，评估器从 actor 读取已训练的轮次。评估离线 actor 时，`baseline` 和 `steered` 分别记录原生 BC 和离线策略。评估在线 actor 时，`steered` 记录当前组合策略，`offline` 记录同一批 seeds 上关闭残差的离线策略。
+
+`resume.pt` 保存模型、优化器、训练进度、RNG 和 HDF5 路径。恢复时需要保留源示教、BC 权重及原运行的 `online/` 目录。每次调用使用新的输出目录，`config.json` 和 `metrics.jsonl` 记录来源、配置及实际更新。
+
+## DSRL、RFS 和 RoboFFT 的训练、恢复与评估
 
 以下命令从仓库根目录运行。用真实预训练权重替换 `PATH_TO_BC.pt`，并为每次运行指定新输出路径。
 
@@ -123,7 +163,10 @@ python -m mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports -
 for algorithm in dsrl rfs robofft; do
     PYTHONPATH=. python tests/validate_integration.py --algorithm "$algorithm" --output "runs/${algorithm}_integration_new" --reference-root ../dexmani_policy
 done
+PYTHONPATH=. python tests/validate_bora_integration.py --output runs/bora_integration_new
 ```
+
+BORA 的 CUDA 验证用小型合成 FlowMatch 权重读取真实 `multi_grasp` 示教，完成 BC、有效 PPO、两轮自主采集和跨轮恢复，再将原生 BC、离线和在线策略放入相同的两个测试场景。测试配置将每回合限为 16 个控制步。150 条示教记录了 30,183 个动作，其中 28,735 个位于首次终止及以前；示教 seed 与 200 个评估 seed 无交集。
 
 GPU 集成测试使用合成权重，检查仿真采集、冻结权重、恢复后的更新及与原生 FlowMatch 的推理对照。RoboFFT 的合成收缩速度场用于在官方 logp 下限 `-1` 下检验非零梯度。配对评估回归用同一策略在 seed `42039` 上逐项比较初始观测、首个动作块和回合结果。
 

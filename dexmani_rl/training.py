@@ -16,12 +16,16 @@ def training_arguments(algorithm):
     parser.add_argument('--weights', choices=['ema', 'raw'])
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--device', default='cuda:0')
+    if algorithm == 'bora':
+        parser.add_argument('--through', choices=['offline', 'round1', 'round2'], default='round2',
+                            help='Last stage to run before saving the training snapshot')
+        parser.add_argument('--demonstrations', type=Path, help='Directory containing episode_*.h5')
     args = parser.parse_args()
     if args.output.exists():
         raise FileExistsError(args.output)
     if args.resume:
-        if args.config or args.weights:
-            parser.error('--resume uses the saved config and weight selection')
+        if args.config or args.weights or getattr(args, 'demonstrations', None):
+            parser.error('--resume uses the saved config, weight selection and data source')
         saved = torch.load(args.resume, map_location='cpu', weights_only=False)
         if (not isinstance(saved, dict) or saved.get('algorithm') != algorithm
                 or 'model' not in saved):
