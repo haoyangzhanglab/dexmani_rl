@@ -12,7 +12,6 @@ value_coef: 0.5
 entropy_coef: 0.0
 max_grad_norm: 1.0
 residual_scale: 0.1
-decode_batch: 64
 total_steps: 200000
 eval_interval_updates: 5
 max_hours: 24

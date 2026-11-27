@@ -1,5 +1,23 @@
+# Python 字节码与测试缓存
 __pycache__/
+*.pyc
+*.pyo
 .pytest_cache/
+
+# 构建与安装产物
+/build/
+/dist/
 *.egg-info/
-runs/
+*.whl
+
+# 本地环境
+/.venv/
+/.env
+/.env.*
+!/.env.example
+
+# 训练、评估与模型权重
+/runs/
 *.pt
+*.pth
+*.ckpt

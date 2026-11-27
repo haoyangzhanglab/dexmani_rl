@@ -1,46 +1,27 @@
-import argparse
 import copy
 import json
 import time
-from pathlib import Path
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 from .base_policy import load_policy, FrozenPolicy
 from .dsrl import DSRL
 from .replay import Replay
 from .env import make_env, seed_split
 from .evaluate import evaluate, compare
 from .checkpoint import save, capture_rng, restore_rng
+from .training import actor_snapshot, record_validation, selection_deadline, training_arguments
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--checkpoint')
-    source.add_argument('--resume')
-    parser.add_argument('--config')
-    parser.add_argument('--weights', choices=['ema', 'raw'])
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--device', default='cuda:0')
-    args = parser.parse_args()
-    saved = None
-    if args.resume:
-        if args.config or args.weights:
-            parser.error('--resume uses the saved config and weight selection')
-        saved = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if saved['algorithm'] != 'dsrl':
-            raise ValueError('Requires a DSRL resume checkpoint')
-        cfg, checkpoint, weights = (saved[k] for k in ('config', 'base_checkpoint', 'weights'))
-    else:
-        cfg = OmegaConf.to_container(OmegaConf.load(args.config or 'configs/dsrl.yaml'), resolve=True)
-        checkpoint, weights = str(Path(args.checkpoint).resolve()), args.weights
-    if not (0 <= cfg['warmup_steps'] <= cfg['total_steps'] and
-            0 < cfg['train_hours'] <= cfg['max_hours'] and
-            0 < cfg['gamma'] <= 1 and 0 < cfg['tau'] <= 1 and cfg['noise_magnitude'] > 0):
-        raise ValueError('Invalid training budget or algorithm hyperparameters')
-    output = Path(args.output)
-    output.mkdir(parents=True, exist_ok=False)
+    args, cfg, checkpoint, weights, saved = training_arguments('dsrl')
+    counts = ('total_steps', 'replay_capacity', 'decode_batch', 'eval_interval_chunks')
+    if (any(type(cfg[key]) is not int or cfg[key] <= 0 for key in counts)
+            or type(cfg['warmup_steps']) is not int
+            or not 0 <= cfg['warmup_steps'] <= cfg['total_steps']
+            or not 0 < cfg['train_hours'] <= cfg['max_hours']):
+        raise ValueError('Invalid DSRL collection or time budget')
+    output = args.output
+    best_path = output / 'best.pt'
     started = time.monotonic()
     torch.manual_seed(cfg['seed'])
     policy, policy_cfg, weights = load_policy(checkpoint, args.device, weights)
@@ -50,7 +31,8 @@ def main():
         test_seeds, validation_seeds = saved['test_seeds'], saved['validation_seeds']
         excluded = set(saved['excluded_seeds'])
     replay = Replay(cfg['replay_capacity'])
-    steps, chunks, last_eval_chunk, elapsed, best_score = 0, 0, 0, 0., -1.
+    steps, chunks, actor_update_chunk, last_eval_chunk = 0, 0, 0, 0
+    elapsed, best_score = 0., -1.
     best_actor = None
     seed_rng = np.random.default_rng(cfg['seed'])
     with make_env(policy, policy_cfg) as env:
@@ -61,9 +43,9 @@ def main():
         for name, optimizer in agent.optimizers.items():
             optimizer.load_state_dict(saved['optimizers'][name])
         replay.load_state_dict(saved['replay'])
-        steps, chunks, last_eval_chunk, elapsed = (saved[k] for k in ('steps', 'chunks', 'last_eval_chunk', 'elapsed'))
-        best_score = saved['best_score']
-        best_actor = saved['best_actor']
+        steps, chunks, actor_update_chunk, last_eval_chunk = (
+            saved[k] for k in ('steps', 'chunks', 'actor_update_chunk', 'last_eval_chunk'))
+        elapsed, best_score, best_actor = (saved[k] for k in ('elapsed', 'best_score', 'best_actor'))
         restore_rng(saved, seed_rng, base.device)
         del saved
     deadline = started + max(0, cfg['max_hours'] * 3600 - elapsed)
@@ -72,14 +54,27 @@ def main():
                     torch=str(torch.__version__),
                     test_seeds=test_seeds, validation_seeds=validation_seeds,
                     excluded_seeds=sorted(excluded))
+    output.mkdir(parents=True, exist_ok=False)
     (output / 'config.json').write_text(json.dumps(dict(metadata, policy_config=policy_cfg), indent=2))
 
     def snapshot():
         return dict(metadata, model=agent.state_dict(),
             optimizers={name: optimizer.state_dict() for name, optimizer in agent.optimizers.items()}, replay=replay.state_dict(),
-            steps=steps, chunks=chunks, last_eval_chunk=last_eval_chunk,
+            steps=steps, chunks=chunks, actor_update_chunk=actor_update_chunk, last_eval_chunk=last_eval_chunk,
             elapsed=elapsed + time.monotonic() - started, best_score=best_score, best_actor=best_actor,
             **capture_rng(seed_rng, base.device))
+
+    def validate(end, phase, log):
+        nonlocal best_score, best_actor, last_eval_chunk
+        results = evaluate(policy, policy_cfg, validation_seeds, {'steered': agent.actor},
+                           noise_magnitude=cfg['noise_magnitude'], deadline=end)['steered']
+        score = record_validation(results, len(validation_seeds), phase, log, steps=steps, chunks=chunks)
+        if score is None:
+            return
+        last_eval_chunk = actor_update_chunk
+        if score > best_score:
+            best_score, best_actor = score, actor_snapshot(agent.actor)
+            save(best_path, {**metadata, 'actor': best_actor})
 
     from dexmani_sim import EpisodeRejected
     with (output / 'metrics.jsonl').open('a', buffering=1) as log:
@@ -109,30 +104,30 @@ def main():
                             terminated=[float(done)])
                         steps += info['steps']
                         chunks += 1
-                        metrics = agent.update(replay) if steps >= cfg['warmup_steps'] else {}
+                        metrics = {}
+                        if steps >= cfg['warmup_steps'] and time.monotonic() < training_deadline:
+                            metrics = agent.update(replay)
+                            actor_update_chunk = chunks
                         log.write(json.dumps(dict(steps=steps, chunks=chunks, seed=seed, reward=reward, **metrics)) + '\n')
                         context, state = next_context, next_state
                         if done or truncated:
                             break
-                    if steps >= cfg['warmup_steps'] and chunks - last_eval_chunk >= cfg['eval_interval_chunks']:
-                        results = evaluate(policy, policy_cfg, validation_seeds, {'steered': agent.actor},
-                            noise_magnitude=cfg['noise_magnitude'], deadline=training_deadline)['steered']
-                        if len(results) == len(validation_seeds):
-                            last_eval_chunk = chunks
-                            score = float(np.mean([r['success'] for r in results]))
-                            log.write(json.dumps(dict(validation=results, success_rate=score, steps=steps)) + '\n')
-                            if score > best_score:
-                                best_score = score
-                                best_actor = {k: v.detach().cpu().clone() for k, v in agent.actor.state_dict().items()}
-                                save(output / 'best.pt', {**metadata, 'actor': best_actor})
+                    if (actor_update_chunk - last_eval_chunk >= cfg['eval_interval_chunks']
+                            and time.monotonic() < training_deadline):
+                        validate(training_deadline, 'scheduled', log)
             save(output / 'resume.pt', snapshot())
+        if actor_update_chunk != last_eval_chunk and time.monotonic() < deadline:
+            end = selection_deadline(training_deadline, deadline, time.monotonic(),
+                                     len(validation_seeds), 2 * len(test_seeds))
+            validate(end, 'final', log)
     save(output / 'last.pt', {**metadata, 'actor': agent.actor.state_dict()})
     actor = agent.actor
     if best_actor is not None:
-        save(output / 'best.pt', {**metadata, 'actor': best_actor})
+        if not best_path.exists():
+            save(best_path, {**metadata, 'actor': best_actor})
         actor = copy.deepcopy(agent.actor)
         actor.load_state_dict(best_actor)
-    has_updates = steps > 0 and steps >= cfg['warmup_steps']
+    has_updates = actor_update_chunk > 0
     evaluated_checkpoint = ('best.pt' if best_actor is not None else 'last.pt') if has_updates else None
     policies = {'baseline': None}
     if has_updates:

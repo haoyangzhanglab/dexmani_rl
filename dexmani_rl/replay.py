@@ -15,9 +15,9 @@ class Replay:
         self.position = (self.position + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(self, batch_size, device):
+    def sample(self, batch_size, device, *, fields):
         indices = torch.randint(self.size, (batch_size,))
-        return {k: v[indices].to(device) for k, v in self.data.items()}
+        return {key: self.data[key][indices].to(device) for key in fields}
 
     def state_dict(self):
         return dict(capacity=self.capacity, position=self.position, size=self.size,

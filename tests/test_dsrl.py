@@ -48,6 +48,29 @@ def test_nonfinite_gradient_stops_before_optimizer_step():
     assert parameter.item() == 0.
 
 
+def test_replay_sampling_selected_fields_preserves_indices_and_rng():
+    replay = Replay(3)
+    for value in range(5):
+        replay.add(state=[value], context=[[value, value + 1]], action=[2 * value])
+    rng = torch.get_rng_state()
+    full = replay.sample(8, 'cpu', fields=tuple(replay.data))
+    expected_rng = torch.get_rng_state()
+    torch.set_rng_state(rng)
+    selected = replay.sample(8, 'cpu', fields=('state', 'context'))
+    assert list(selected) == ['state', 'context']
+    assert torch.equal(torch.get_rng_state(), expected_rng)
+    for key in selected:
+        torch.testing.assert_close(selected[key], full[key], rtol=0, atol=0)
+
+
+def test_dsrl_requires_actor_updates_and_allows_no_distillation():
+    cfg = dict(width=16, depth=2, lr=.001, batch_size=4, utd=1, noise_updates=0,
+               noise_magnitude=1.5, gamma=.99, tau=.005)
+    assert DSRL(Base(), cfg).cfg['noise_updates'] == 0
+    with pytest.raises(ValueError, match='Invalid DSRL network size or update counts'):
+        DSRL(Base(), dict(cfg, utd=0))
+
+
 def test_updates_and_restore():
     cfg = dict(width=16, depth=2, lr=.001, batch_size=4, utd=2, noise_updates=2,
                noise_magnitude=1.5, gamma=.99, tau=.005)

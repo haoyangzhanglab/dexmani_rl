@@ -39,6 +39,22 @@ def test_checkpoint_rejects_uncalibrated_dataset_rgb_processing(tmp_path, key, v
         load_policy(checkpoint, 'cpu')
 
 
+def test_loader_rejects_rl_checkpoint(tmp_path):
+    checkpoint = tmp_path / 'last.pt'
+    torch.save({'algorithm': 'rfs', 'actor': {}}, checkpoint)
+    with pytest.raises(ValueError, match='Expected a BC checkpoint'):
+        load_policy(checkpoint, 'cpu')
+
+
+def test_loader_reports_missing_ema_weights(tmp_path):
+    checkpoint = tmp_path / 'bc.pt'
+    cfg = dict(agent={'_target_': 'dexmani_policy.agents.policies.flowmatch.FlowMatch'},
+               action_key='action', dataset={}, eval={'use_ema': True})
+    torch.save({'effective_config': cfg, 'model_state': {}}, checkpoint)
+    with pytest.raises(ValueError, match='Requested ema BC weights are absent'):
+        load_policy(checkpoint, 'cpu')
+
+
 def test_residual_is_added_before_physical_clipping():
     normalizer = LinearNormalizer({'action': (19,)})
     normalizer['action'].scale.fill_(2.)

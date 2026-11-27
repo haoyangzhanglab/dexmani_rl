@@ -45,7 +45,7 @@ def make_env(policy, cfg):
     from dexmani_sim.envs.lifecycle import open_env
     kwargs = dict(cfg['env_runner'].get('env_kwargs') or {})
     kwargs.update(render_mode='rgb_array', record_video=False,
-                  observation_keys=tuple(k for k in cfg['normalization_dims'] if k != 'action'))
+                  observation_keys=tuple(k for k in policy.normalization_dims if k != 'action'))
     with open_env(resolve_env_class(cfg['env_runner']['task_name']), **kwargs) as env:
         yield ChunkEnv(env, policy, cfg)
 

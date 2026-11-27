@@ -1,42 +1,45 @@
 # DexMani RL
 
-冻结 FlowMatch，在 `dexmani_sim` 中比较两个在线后训练 baseline：DSRL-NA 学习初始噪声，RFS-PPO 联合学习初始噪声与动作残差。基础策略、视觉编码器和 normalizer 均冻结，推理统一使用 FP32。当前完成算法与训练链路实现，尚缺真实预训练 BC checkpoint，未验证成功率提升。
+本仓库在 `dexmani_sim` 中研究 FlowMatch 的在线后训练。DSRL-NA 学习初始噪声，RFS-PPO 联合学习初始噪声与动作残差，RoboFFT-F 直接微调 action decoder。三者均冻结视觉编码器和 normalizer，使用 FP32。DSRL 和 RFS 也冻结 decoder。当前尚缺真实预训练 BC checkpoint，未验证成功率提升。
 
 ## 来源与结构
 
-- [DSRL 论文](https://arxiv.org/html/2506.15799v2)及[官方实现](https://github.com/ajwagen/stable-baselines3-dsrl/blob/10e5d311b5c42fe571ff3eeb72f622ca616a149d/stable_baselines3/dsrl/dsrl.py)：独立实现更新方程，不依赖 SB3 或 DPPO。
-- [RFS 论文](https://arxiv.org/html/2602.01789v3)及[项目主页](https://weirdlabuw.github.io/rfs/)：按论文实现在线联合调制与 PPO；调研时官方代码尚未公开。本仓库适配 xArm7+XHand 和冻结视觉特征，不包含论文的特权状态教师、蒸馏、离线 TD3+BC、六任务环境或真机流程。
-- 冻结推理代码来自 `dexmani_policy@8031c85e99a11e7b93451dedbfa291fc2eaf07ca`，仿真接口基于 `dexmani_sim@64abf055af5ceca1e86294a63776c1eb77ea7e92`；相邻两个仓库未修改。
+- DSRL-NA 的更新方程与官方实现对照。[论文](https://arxiv.org/html/2506.15799v2) · [官方实现](https://github.com/ajwagen/stable-baselines3-dsrl/blob/10e5d311b5c42fe571ff3eeb72f622ca616a149d/stable_baselines3/dsrl/dsrl.py)
+- RFS-PPO 按论文实现在 xArm7+XHand 仿真中的在线联合调制和 PPO，使用冻结视觉特征。[论文](https://arxiv.org/html/2602.01789v3) · [项目主页](https://weirdlabuw.github.io/rfs/)
+- 冻结推理代码来自 `dexmani_policy@8031c85e99a11e7b93451dedbfa291fc2eaf07ca`，仿真接口基于 `dexmani_sim@64abf055af5ceca1e86294a63776c1eb77ea7e92`。
 
 | 模块 | 职责 |
 | --- | --- |
-| `train_dsrl.py`、`train_rfs.py` | 各自独立的采集、更新、选模、保存与恢复循环 |
-| `dsrl.py`、`rfs.py` | 各算法的网络与更新方程 |
+| `train_dsrl.py`、`train_rfs.py`、`train_robofft.py` | 各算法的采集、更新、选模与恢复循环 |
+| `training.py` | 通用训练入口与选模规则 |
+| `dsrl.py`、`rfs.py`、`robofft.py` | 各算法的网络、采样和更新方程 |
 | `evaluate.py` | rollout、同 seed 配对评估及统计 |
 | `env.py` | 仿真生命周期、观测历史和动作块执行 |
 | `base_policy.py` | BC 加载、冻结特征、动作映射与策略维度 |
 | `replay.py` | DSRL 的 CPU float32 replay |
-| `checkpoint.py` | 仅 `save`、`capture_rng`、`restore_rng` 三个函数 |
+| `checkpoint.py` | 原子保存和训练 RNG 状态 |
 
-`policy/` 保留 8 个实际推理模块：`flowmatch`、`dit`、`encoder`、`pointcloud`、`vision`、`fusion`、`normalizer`、`preprocess`。标准/factorized DiTX、DINO/DINOv3/SigLIP 和 LoRA 的 checkpoint 权重名称与配置保持支持。DSRL 的优化器按 `actor`、`critic`、`noise_critic`、`alpha` 命名保存；RFS 只接收状态、噪声、动作维度与配置/device，不持有基础策略。没有共用 trainer 或兼容层。
+`policy/` 包含 FlowMatch、DiTX、观测编码器、点云、视觉、融合、归一化及预处理模块。标准/factorized DiTX、DINO/DINOv3/SigLIP 和 LoRA 的 checkpoint 权重名称与配置保持支持。DSRL 的优化器按 `actor`、`critic`、`noise_critic`、`alpha` 命名保存。RFS 只接收状态、噪声、动作维度与配置/device，不持有基础策略。
 
-观测历史由 `ChunkEnv` 补齐和堆叠；冻结编码器输出完整 flow context，以及每帧场景 token 均值和关节历史组成的 RL state。DSRL 保存冻结 context/state 到 replay；RFS 保存当轮状态、原始联合采样、log-prob、价值与转移，不使用 replay。两者更新时均不重新编码图像。
+观测历史由 `ChunkEnv` 补齐和堆叠。冻结编码器输出完整 flow context，以及每帧场景 token 均值和关节历史组成的 RL state。DSRL 保存冻结 context/state 到 replay。RFS 保存当轮状态、原始联合采样、log-prob、价值与转移，不使用 replay。RoboFFT 缓存完整 flow context、匹配噪声、时间步和旧 surrogate。更新复用冻结的视觉特征。
 
 ## 环境与 BC 权重
 
-使用现有 conda `policy` 环境：Python 3.10、PyTorch 2.4.1+cu124、torchvision 0.19.1、NumPy 1.26.4、SciPy 1.15.3、SAPIEN 3.0.0b1、mplib 0.2.1、PyTorch3D 0.7.8、transformers 4.48.0、timm 1.0.22；GPU 为 RTX 4090 24 GB。
+使用现有 conda `policy` 环境：Python 3.10、PyTorch 2.4.1+cu124、torchvision 0.19.1、NumPy 1.26.4、SciPy 1.15.3、SAPIEN 3.0.0b1、mplib 0.2.1、PyTorch3D 0.7.8、transformers 4.48.0、timm 1.0.22。GPU 为 RTX 4090 24 GB。
 
 ```bash
 conda activate policy
-# 可选；在仓库根目录也可直接运行模块
+# 可选。在仓库根目录也可直接运行模块
 python -m pip install -e . --no-deps
 ```
 
-`dexmani_sim` 需已安装并具备任务资产和评估种子池；PyTorch3D 需与 PyTorch/CUDA 匹配。运行不依赖安装 `dexmani_policy`；LoRA 权重额外需要 `peft`。
+源码运行和 editable 安装可从任意工作目录读取仓库默认配方。独立安装 wheel 时，通过 `--config` 指定 YAML。
 
-BC checkpoint 格式不变：包含 `effective_config`、`model_state` 和可选 `ema_model_state`，动作键为 `action`，输出19维绝对关节目标（弧度）。EMA/raw 默认遵循 checkpoint 配置，指定权重缺失时显式失败。加载使用原始参数名和 normalizer，不下载视觉权重、不读取示教集或重新拟合统计量。
+`dexmani_sim` 需已安装并具备任务资产和评估种子池。PyTorch3D 需与 PyTorch/CUDA 匹配。运行不依赖安装 `dexmani_policy`。LoRA 权重额外需要 `peft`。
 
-带标定的 RGB 保持原始分辨率；`dataset.rgb_preprocess_size`、`rgb_random_crop_size`、`rgb_color_aug` 必须未设置或为 `null`。缩放通过 `agent.rgb_backbone_config.image_size` 配置，投影同步使用半像素变换。
+BC checkpoint 包含 `effective_config`、`model_state` 和可选 `ema_model_state`，动作键为 `action`，输出19维绝对关节目标（弧度）。EMA/raw 默认遵循 checkpoint 配置，指定权重缺失时显式失败。加载使用原始参数名和 normalizer，不下载视觉权重、不读取示教集或重新拟合统计量。
+
+带标定的 RGB 保持原始分辨率。`dataset.rgb_preprocess_size`、`rgb_random_crop_size`、`rgb_color_aug` 必须未设置或为 `null`。缩放通过 `agent.rgb_backbone_config.image_size` 配置，投影同步使用半像素变换。
 
 ## 算法与默认配方
 
@@ -51,50 +54,83 @@ BC checkpoint 格式不变：包含 `effective_config`、`model_state` 和可选
 | 选模间隔 | `eval_interval_chunks=1000`，回合边界触发 | `eval_interval_updates=5`，每5次 PPO 更新 |
 | 训练/总墙钟预算 | 7 / 8小时 | 23 / 24小时 |
 
-两者默认 seed=42、gamma=0.99、`total_steps=200000`、`decode_batch=64`；完整配置见 `configs/`。RFS 的网络、学习率、batch、GAE、clip、价值系数及梯度裁剪沿用论文报告值；rollout 长度、epochs、零熵系数、残差尺度、初始化与固定学习率是本地选择。
+两者默认 seed=42、gamma=0.99、`total_steps=200000`。DSRL 从 replay 更新时，每批最多解码 64 个样本。RFS 的网络、学习率、batch、GAE、clip、价值系数及梯度裁剪沿用论文报告值。rollout 长度、epochs、零熵系数、残差尺度、初始化与固定学习率是本地选择。
 
-DSRL 的 log-prob 在 tanh 后的 `u` 空间计算，含变换修正，target entropy=0。噪声 Q 接收 `u`；BC、warmup 和蒸馏使用标准高斯 `w`，蒸馏输入 `w/1.5` 不裁剪。动作 Q 的 TD target 包含噪声策略熵项，两个噪声 Q 分别蒸馏对应的当前动作 Q；actor 只通过噪声 Q 反传，不通过 flow。动作 Q/replay 统一使用物理限位裁剪后再归一化的动作。
+DSRL 的 log-prob 在 tanh 后的 `u` 空间计算，含变换修正，target entropy=0。噪声 Q 接收 `u`。BC、warmup 和蒸馏使用标准高斯 `w`，蒸馏输入 `w/1.5` 不裁剪。动作 Q 的 TD target 包含噪声策略熵项，两个噪声 Q 分别蒸馏对应的当前动作 Q。actor 只通过噪声 Q 反传，不通过 flow。动作 Q/replay 统一使用物理限位裁剪后再归一化的动作。
 
-RFS 在归一化动作空间合成 `a_norm = FM_norm(context,w) + 0.1*u_r`，再反归一化并按机器人关节限位裁剪；`0.1` 不是弧度，示教区间 `[-1,1]` 也不是硬限位。PPO 的 log-prob、ratio 始终在原始联合采样 `[w,u_r]` 上沿全部维度求和，不对物理动作计算概率。使用整轮 advantage 归一化、clipped surrogate 和价值 MSE；flow 只参与采集，无梯度，value 不裁剪。
+RFS 在归一化动作空间合成 `a_norm = FM_norm(context,w) + 0.1*u_r`，再反归一化并按机器人关节限位裁剪。`0.1` 不是弧度，示教区间 `[-1,1]` 也不是硬限位。PPO 的 log-prob、ratio 始终在原始联合采样 `[w,u_r]` 上沿全部维度求和，不对物理动作计算概率。使用整轮 advantage 归一化、clipped surrogate 和价值 MSE。flow 只参与采集，无梯度，value 不裁剪。
 
-完整 flow 噪声为 `[B,H,19]`，通常 H=16；从 `n_obs_steps-1` 开始执行 K=8 个动作，具体窗口和控制周期沿用 BC 配置，Euler 时间方向为0→1。两算法共享如下时间尺度：
+完整 flow 噪声为 `[B,H,19]`，通常 H=16。从 `n_obs_steps-1` 开始执行 K=8 个动作，具体窗口和控制周期沿用 BC 配置，Euler 时间方向为0→1。三种算法共享动作块时间尺度。
 
-- `total_steps`、`warmup_steps` 和日志 `steps` 是实际执行的控制步；`rollout_steps`、日志 `chunks`、gamma 和 GAE 的一步是一个动作块。
-- 每控制步奖励为 `float(info['success'])`，采用成功保持判定；块内奖励求和，每块折扣一次，不用 `gamma**K`。
-- 成功/失败不 bootstrap；纯超时用重置前观测 bootstrap。RFS 在成功、失败和超时处均切断跨回合 GAE。块内终止立即停止执行。
-- 达到控制步上限时，RFS 可更新不足长度的 rollout；训练时间耗尽则丢弃未更新样本并记入 `discarded_chunks`。预算在动作块、更新等操作边界检查，单次操作可能略超时。
+- `total_steps`、`warmup_steps` 和日志 `steps` 是实际执行的控制步。`rollout_steps`、日志 `chunks`、gamma 和 GAE 的一步是一个动作块。
+- 每控制步奖励为 `float(info['success'])`，采用成功保持判定。块内奖励求和，每块折扣一次，不用 `gamma**K`。
+- 成功/失败不 bootstrap。纯超时用重置前观测 bootstrap。RFS 和 RoboFFT 在成功、失败和超时处均切断跨回合 GAE。块内终止立即停止执行。
+- 达到控制步上限时，RFS 可更新不足长度的 rollout。训练时间耗尽则丢弃未更新样本并记入 `discarded_chunks`。DSRL 在动作块结束时保留已采集的转移，按训练截止时间决定是否启动更新。
+
+## RoboFFT-F
+
+RoboFFT-F 采用官方提交 `a9ca8c8fc7684fc4718b2b7758bcc992eb710e46` 的 Can-state 配方，微调本地 FlowMatch decoder。[论文](https://arxiv.org/html/2609.32236v1) · [官方实现](https://github.com/shshsunny/RoboFFT/tree/a9ca8c8fc7684fc4718b2b7758bcc992eb710e46)
+
+`robofft.py` 包含采样、matching surrogate、PPO、value network 和 reward scaling。`train_robofft.py` 负责采集、更新与保存。加载沿用本仓库 FlowMatch，不依赖安装或修改 `dexmani_policy`。冻结 observation encoder，只复制并解冻 DiTX decoder，保持 `eval()` 禁用 dropout。critic 输入复用冻结特征与关节历史。完整 `[H,19]` 归一化生成样本用于 matching，从 `n_obs_steps-1` 开始执行 K 步。物理关节限位不会反向覆盖 matching target。
+
+以 release 的公式构造 matching surrogate。`x_t=t*a+(1-t)*eps`，目标速度 `a-eps`。`logp=-mean_H,D((v-target)^2)`。旧、新 logp 分别 clamp 到 `[-1,1]`，每个 MC 独立计算 `exp(8*(new-old))` 并做 PPO，最后平均。它与论文先平均 MC loss 再 exp 的写法不同。H16/D19 仍使用 mean(H,D)、alpha=8。KL、ratio 和 clip fraction 的原始诊断采用未乘 alpha 的 ratio，不能解释为真实 likelihood/KL。
+
+采样在同一动作块的 Euler 子步间复用 DiTX context K/V。训练从 Gaussian 初始噪声出发，每个 Euler 步先裁剪归一化动作到 `[-1,1]`，再加 `0.25*sqrt(dt)` Gaussian。末步再裁剪。评估关闭逐步噪声，保留初始 Gaussian。积分步数沿用 BC checkpoint（通常10），forward t 在对应离散网格均匀抽样。每次采集缓存 eps、t 和旧 logp。首个更新 minibatch 在执行优化器前校验逐样本的原始 logp。
+
+| 项目 | 默认值及约定 |
+| --- | --- |
+| Actor / critic | 原 DiTX / 256宽 Mish residual MLP |
+| AdamW LR | actor最高 `2e-6`、最低 `1e-6`，critic `1e-3`。weight decay=0 |
+| 调度 | 151个外层 iteration，10步 warmup 后 cosine。critic恒定LR |
+| 更新 | PPO clip `.02`，target surrogate KL `.01`，MC1，10 epochs，每条transition重复10次 |
+| 优势与价值 | 每个逻辑minibatch标准化优势。value loss=`.5*MSE`，系数再乘`.5`。不裁剪梯度或value |
+| 时间尺度 | gamma `.999`、GAE `.95`，按动作块。成功/失败不bootstrap，纯timeout用末观测bootstrap |
+| 采集规模 | 单环境，512块/rollout，逻辑batch256、microbatch16。冻结context存CPU |
+| 墙钟限制 | 训练22小时、含最终评估24小时。在采集块/完整更新/评估边界检查 |
+
+外层 iteration 0、10、20…用于选模。iteration 1 只更新 critic，iteration 2 起更新 actor 并推进其学习率调度。critic 使用固定学习率。KL 超阈值的 minibatch 仍完成更新，随后停止。每条转移的 10 次重复复用采集时的 eps 和 t。奖励缩放使用官方的跨 rollout 折扣 return、回合切断和 RMS 合并分母 `total_count-1`。奖励除以标准差后裁剪到 `[-10,10]`，评估报告原始奖励。
+
+本地适配包括冻结多模态编码器、DiTX actor、critic输入、单环境batch规模、按BC窗口执行，以及正确处理timeout与环境重置。没有引入anchor、BC regularization、熵或noise network。归一化采样裁剪与机器人关节限位分别记录，logp饱和也单独记录。饱和造成零梯度时不会自动改变算法。
 
 ## 训练、恢复与评估
 
-以下 `PATH_TO_BC.pt` 需要替换为真实预训练权重；正式性能实验尚未执行。
+以下命令从仓库根目录运行。用真实预训练权重替换 `PATH_TO_BC.pt`，并为每次运行指定新输出路径。
 
 ```bash
 python -m dexmani_rl.train_dsrl --checkpoint PATH_TO_BC.pt --config configs/dsrl.yaml --output runs/dsrl_task_seed42
 python -m dexmani_rl.train_rfs --checkpoint PATH_TO_BC.pt --config configs/rfs.yaml --output runs/rfs_task_seed42
-python -m dexmani_rl.train_rfs --resume runs/rfs_task_seed42/resume.pt --output runs/rfs_task_seed42_resume
-python -m dexmani_rl.evaluate --rl-checkpoint runs/rfs_task_seed42_resume/best.pt --episodes 100 --output runs/rfs_comparison.json
+python -m dexmani_rl.train_robofft --checkpoint PATH_TO_BC.pt --config configs/robofft.yaml --output runs/robofft_task_seed42
+python -m dexmani_rl.train_robofft --resume runs/robofft_task_seed42/resume.pt --output runs/robofft_task_seed42_resume
+python -m dexmani_rl.evaluate --rl-checkpoint runs/robofft_task_seed42/best.pt --episodes 100 --output runs/robofft_comparison.json
 python -m dexmani_rl.evaluate --checkpoint PATH_TO_BC.pt --output runs/baseline.json
 ```
 
-DSRL 恢复同样使用 `train_dsrl --resume`；两种 RL 评估统一使用 `--rl-checkpoint`。所有入口支持 `--device`；新训练和独立 BC 评估可用 `--weights raw/ema`。恢复使用保存的配置、基础权重路径和权重选择，需保留该 BC 文件；输出目录/文件必须尚不存在。
+恢复时使用对应算法的训练入口和 `resume.pt`。独立 RL 评估使用 `best.pt` 或 `last.pt`。所有入口支持 `--device`，新训练和独立 BC 评估支持 `--weights raw/ema`。恢复和独立 RL 评估沿用 checkpoint 所记录的配置及 BC 权重路径。
 
-评估池排序后以1024打乱，前100个作为测试，后20个选模，训练排除整个评估池。三组种子写入 RL checkpoint，恢复和独立 RL 评估沿用保存结果。BC 独立评估从当前池划分；`--episodes` 默认完整测试池，显式值须为正且不超过池长度。
+评估池排序后用种子 1024 打乱，前 100 个用于测试，后 20 个用于选模。训练排除整个评估池。每种策略在每个 seed 上单独建场，首次 reset 后开始回合，并用同一个 seed 初始化策略 RNG。每组完整跑完才计入结果。`comparison` 为原生 BC 与所选 actor 的配对比较。RoboFFT 额外用 `sampler_baseline` 记录采用同一采样器的初始 decoder，并报告 `comparison_vs_sampler`。配对成功率差的置信区间由两个不一致成功结果的 97.5% Clopper–Pearson 区间合成。
 
-配对评估对每个 seed 重设环境与策略 RNG，BC 和调制策略采用相同窗口、积分步数与采样预算，无 best-of-N。每环境最多25次回合尝试，双策略每批12个 seed；只提交完整配对，截止时舍弃未完成的整对。`comparison` 报告成功数、成功率差和 `paired_conservative_95_ci`：两个不一致结果的97.5% Clopper–Pearson 区间经 Bonferroni 合成至少95%覆盖区间；它不代表跨训练 seed 的稳定性。
+各算法按配置执行定期选模，结束时在剩余预算内补评尚未经完整选模的最新 actor。完整选模集的成功率严格提高才替换 `best.pt`，同分保留已有最佳。恢复时沿用快照中的选模结果和进度。无完整选模结果时使用 `last.pt`。DSRL 和 RFS 在首次 actor 更新前仅评估 BC，RoboFFT 可用初始 decoder 参加选模。
 
-`best.pt` 按完整选模集成功率保存 actor 与重建元数据；`last.pt` 保存最新 actor。`resume.pt` 保存最新模型、优化器、RNG、计数、选模进度、历史最佳 actor 和累计墙钟，DSRL 另保存 replay。DSRL 每25次回合尝试保存恢复点，RFS 每次 PPO 更新后保存；恢复从新回合开始，不恢复物理场景或旧 RFS rollout。最终评估使用独立的最佳 actor，保留最新训练状态；已有更新但无最佳模型时评估 `last.pt`，首次更新前预算耗尽则仅评估 BC。
-
-`config.json` 记录 RL/BC 配置与权重来源；RL checkpoint 用 `algorithm='dsrl'|'rfs'` 标识方法，保存 RL 配置、基础权重路径与选择；BC 配置从基础 checkpoint 读取。`metrics.jsonl` 记录训练及 reset 拒绝，`evaluation.json` 统一输出 `algorithm`、`rl_checkpoint`、`baseline`、`steered`、`comparison`，成功计数字段为 `steered_successes`。训练输出的 `rl_checkpoint` 相对当前输出目录，独立评估为绝对路径；独立 BC 的 `algorithm='bc'`、`rl_checkpoint=null`、`steered=[]`。
+`last.pt` 保存最新 actor。`resume.pt` 保存训练状态、RNG、进度和累计墙钟。DSRL 另保存 replay，RoboFFT 另保存 actor 调度器和 reward scaler。使用含当前训练字段的快照恢复，从新回合开始。`config.json` 记录配置和权重来源，`metrics.jsonl` 记录更新及选模阶段与完成状态，`evaluation.json` 记录最终评估及实际使用的 checkpoint。
 
 ## 验证
+
+在 `policy` 环境从仓库根目录运行，复跑时为每个命令选用新的输出位置。
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
 python -m mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports --follow-imports=silent dexmani_rl
-PYTHONPATH=. python tests/validate_integration.py --algorithm dsrl --output runs/chain_dsrl_integration_02 --reference-root ../dexmani_policy
-PYTHONPATH=. python tests/validate_integration.py --algorithm rfs --output runs/chain_rfs_integration_02 --reference-root ../dexmani_policy
+for algorithm in dsrl rfs robofft; do
+    PYTHONPATH=. python tests/validate_integration.py --algorithm "$algorithm" --output "runs/${algorithm}_integration_new" --reference-root ../dexmani_policy
+done
 ```
 
-当前验收：72 项 CPU 测试通过，mypy 检查19个源码文件通过；wheel 构建及包内三个 CLI 模块导入通过。结构清理前后，固定输入与 RNG 下的两算法采样、loss、更新后模型、优化器和 RNG 逐项一致。
+GPU 集成测试使用合成权重，检查仿真采集、冻结权重、恢复后的更新及与原生 FlowMatch 的推理对照。RoboFFT 的合成收缩速度场用于在官方 logp 下限 `-1` 下检验非零梯度。配对评估回归用同一策略在 seed `42039` 上逐项比较初始观测、首个动作块和回合结果。
 
-GPU 集成脚本生成随机权重 `fixture.pt`、短程配置 `smoke.yaml` 和 `validation.json`；DSRL 完成4次更新，RFS 完成2次更新，两者均在中途保存模型、优化器及 RNG 后重新加载并继续更新，冻结权重不变；非恒等 normalizer、非零时间与观测调制下的推理与原仓库对照通过。正式训练入口输出位于 `runs/chain_dsrl_train_01/`、`runs/chain_rfs_train_01/`；统一评估入口各完成2个 seed 的配对评估，输出为 `runs/chain_dsrl_eval_01.json`、`runs/chain_rfs_eval_01.json`。这些随机权重产物仅验证链路，不用于成功率或复现性能结论。
+官方数值对照使用 `test` extra 中的 Python 依赖，直接加载 `--reference-root` 下的官方源码。以下命令固定参考提交。验证覆盖 MC1/2 的 logp、梯度、一次 AdamW 更新、训练与评估采样、奖励缩放、critic 和 151 轮学习率调度。
+
+```bash
+git clone https://github.com/shshsunny/RoboFFT.git ../RoboFFT
+git -C ../RoboFFT checkout --detach a9ca8c8fc7684fc4718b2b7758bcc992eb710e46
+PYTHONDONTWRITEBYTECODE=1 python tests/validate_robofft_reference.py --reference-root ../RoboFFT/robofft-f --output runs/robofft_reference_new.json
+```

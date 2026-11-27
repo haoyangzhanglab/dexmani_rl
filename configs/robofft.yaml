@@ -1,0 +1,27 @@
+# RoboFFT a9ca8c8 Can-state algorithm; local frozen visual features and single environment.
+seed: 42
+value_width: 256
+actor_lr: 0.000002
+actor_min_lr: 0.000001
+value_lr: 0.001
+lr_warmup_iterations: 10
+critic_warmup_iterations: 2
+iterations: 151
+eval_interval: 10
+rollout_steps: 512
+batch_size: 256
+microbatch_size: 16
+update_epochs: 10
+repeat_samples: 10
+n_samples: 1
+noise_std: 0.25
+gamma: 0.999
+gae_lambda: 0.95
+clip_coef: 0.02
+value_coef: 0.5
+ratio_alpha: 8.0
+target_kl: 0.01
+logprob_min: -1.0
+logprob_max: 1.0
+train_hours: 22
+max_hours: 24

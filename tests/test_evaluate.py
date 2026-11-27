@@ -82,17 +82,14 @@ def simulation(monkeypatch):
     return environments, actor
 
 
-@pytest.mark.parametrize('names,count,resets', [
-    (('baseline',), 26, [25, 1]),
-    (('steered',), 26, [25, 1]),
-    (('baseline', 'steered'), 13, [24, 2]),
-])
-def test_evaluation_reuses_environments_and_seeds(simulation, names, count, resets):
+@pytest.mark.parametrize('names', [('baseline',), ('steered',), ('baseline', 'steered')])
+def test_each_evaluation_starts_from_a_fresh_environment(simulation, names):
     environments, actor = simulation
     policies = {name: None if name == 'baseline' else actor for name in names}
+    count = 3
     result = evaluation.evaluate(None, {}, list(range(count)), policies, noise_magnitude=1.5)
-    assert [len(env.episodes) for env in environments] == resets
-    assert all(env.closed for env in environments)
+    assert len(environments) == count * len(names)
+    assert all(env.closed and len(env.episodes) == 1 for env in environments)
     for name in names:
         assert result[name] == [dict(seed=i, success=True, steps=2, reward=1.) for i in range(count)]
     episodes = [episode for env in environments for episode in env.episodes]
@@ -121,7 +118,8 @@ def test_rfs_pairs_use_independent_seeded_joint_samples(simulation):
     actor = RFSActor(1, 2, 2, [4], .1)
     result = evaluation.evaluate(None, {}, [11, 12], {'baseline': None, 'steered': actor})
     assert result['baseline'] == result['steered']
-    episodes = environments[0].episodes
+    episodes = [env.episodes[0] for env in environments]
+    assert len(episodes) == 4
     for seed, baseline, rfs in zip([11, 12], episodes[::2], episodes[1::2]):
         generator = torch.Generator().manual_seed(seed)
         expected = torch.stack([torch.randn(1, 2, generator=generator)[0] for _ in range(2)])
@@ -165,9 +163,8 @@ def test_rl_cli_loads_actor_without_extra_environment(simulation, monkeypatch, t
     assert result['rl_checkpoint'] == str(checkpoint)
     assert result['checkpoint'] == 'base.pt'
     assert result['weights'] == 'ema'
-    assert len(environments) == 1
-    assert len(environments[0].episodes) == 2 * len(expected_seeds)
-    assert environments[0].closed
+    assert len(environments) == 2 * len(expected_seeds)
+    assert all(env.closed and len(env.episodes) == 1 for env in environments)
 
 
 def test_bc_cli_uses_shared_result_shape(simulation, monkeypatch, tmp_path):
@@ -182,19 +179,52 @@ def test_bc_cli_uses_shared_result_shape(simulation, monkeypatch, tmp_path):
     assert result['algorithm'] == 'bc' and result['rl_checkpoint'] is None
     assert [episode['seed'] for episode in result['baseline']] == [11, 12, 13]
     assert result['steered'] == [] and result['comparison'] == {'episodes': 0}
-    assert len(environments) == 1 and environments[0].closed
+    assert len(environments) == 3 and all(env.closed for env in environments)
 
 
 def test_rl_cli_rejects_unknown_algorithm(simulation, monkeypatch, tmp_path):
     environments, _ = simulation
     checkpoint = tmp_path / 'unknown.pt'
     output = tmp_path / 'evaluation.json'
-    torch.save({'algorithm': 'unknown'}, checkpoint)
+    torch.save({'algorithm': 'unknown', 'actor': {}}, checkpoint)
     monkeypatch.setattr(sys, 'argv', ['evaluate', '--rl-checkpoint', str(checkpoint),
                                     '--device', 'cpu', '--output', str(output)])
     with pytest.raises(ValueError, match='Unsupported RL algorithm'):
         evaluation.main()
     assert not environments and not output.exists()
+
+
+@pytest.mark.parametrize('saved', [
+    {'algorithm': 'rfs', 'model': {}},
+    {'algorithm': 'robofft', 'model': {}, 'reward_scaler': {'var': np.ones(())}},
+    {'effective_config': {}},
+])
+def test_rl_cli_rejects_resume_and_bc_checkpoints(monkeypatch, tmp_path, saved):
+    checkpoint = tmp_path / 'wrong_checkpoint.pt'
+    output = tmp_path / 'evaluation.json'
+    torch.save(saved, checkpoint)
+    monkeypatch.setattr(sys, 'argv', ['evaluate', '--rl-checkpoint', str(checkpoint), '--device', 'cpu',
+                                    '--output', str(output)])
+    with pytest.raises(ValueError, match='saved RL actor'):
+        evaluation.main()
+    assert not output.exists()
+
+
+def test_cli_does_not_replace_output_created_during_evaluation(monkeypatch, tmp_path):
+    output = tmp_path / 'evaluation.json'
+
+    def evaluate(*args, **kwargs):
+        output.write_text('first writer')
+        return {'baseline': []}
+
+    monkeypatch.setattr(evaluation, 'evaluate', evaluate)
+    monkeypatch.setattr(evaluation, 'load_policy', lambda *args: (None, {'env_runner': {'task_name': 'task'}}, 'raw'))
+    monkeypatch.setattr(evaluation, 'seed_split', lambda task: ([11], [], set()))
+    monkeypatch.setattr(sys, 'argv', ['evaluate', '--checkpoint', 'base.pt', '--device', 'cpu',
+                                    '--output', str(output)])
+    with pytest.raises(FileExistsError):
+        evaluation.main()
+    assert output.read_text() == 'first writer'
 
 
 @pytest.mark.parametrize('episodes', ['0', '-1', '4'])

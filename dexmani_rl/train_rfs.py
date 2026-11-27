@@ -1,46 +1,25 @@
-import argparse
 import copy
 import json
 import time
 from contextlib import ExitStack
-from pathlib import Path
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 from .base_policy import load_policy, FrozenPolicy
 from .env import make_env, seed_split
 from .evaluate import evaluate, compare
 from .rfs import RFS
 from .checkpoint import save, capture_rng, restore_rng
+from .training import actor_snapshot, record_validation, selection_deadline, training_arguments
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--checkpoint')
-    source.add_argument('--resume')
-    parser.add_argument('--config')
-    parser.add_argument('--weights', choices=['ema', 'raw'])
-    parser.add_argument('--output', required=True)
-    parser.add_argument('--device', default='cuda:0')
-    args = parser.parse_args()
-    saved = None
-    if args.resume:
-        if args.config or args.weights:
-            parser.error('--resume uses the saved config and weight selection')
-        saved = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if saved['algorithm'] != 'rfs':
-            raise ValueError('Requires an RFS-PPO resume checkpoint')
-        cfg, checkpoint, weights = (saved[k] for k in ('config', 'base_checkpoint', 'weights'))
-    else:
-        cfg = OmegaConf.to_container(OmegaConf.load(args.config or 'configs/rfs.yaml'), resolve=True)
-        checkpoint, weights = str(Path(args.checkpoint).resolve()), args.weights
+    args, cfg, checkpoint, weights, saved = training_arguments('rfs')
     if (any(type(cfg[k]) is not int or cfg[k] <= 0 for k in
-            ('total_steps', 'rollout_steps', 'eval_interval_updates', 'decode_batch')) or
+            ('total_steps', 'rollout_steps', 'eval_interval_updates')) or
             cfg['rollout_steps'] < 2 or not 0 < cfg['train_hours'] <= cfg['max_hours']):
         raise ValueError('Invalid RFS collection or time budget')
-    output = Path(args.output)
-    output.mkdir(parents=True, exist_ok=False)
+    output = args.output
+    best_path = output / 'best.pt'
     started = time.monotonic()
     torch.manual_seed(cfg['seed'])
     policy, policy_cfg, weights = load_policy(checkpoint, args.device, weights)
@@ -50,7 +29,7 @@ def main():
         test_seeds, validation_seeds = saved['test_seeds'], saved['validation_seeds']
         excluded = set(saved['excluded_seeds'])
     with make_env(policy, policy_cfg) as env:
-        base = FrozenPolicy(policy, policy_cfg, env.env.robot.qlimits, cfg['decode_batch'])
+        base = FrozenPolicy(policy, policy_cfg, env.env.robot.qlimits)
         agent = RFS(base.state_dim, base.noise_dim, base.action_dim, cfg, base.device)
     steps, chunks, updates, last_eval_update, discarded_chunks = 0, 0, 0, 0, 0
     elapsed, best_score, best_actor = 0., -1., None
@@ -69,6 +48,7 @@ def main():
                     torch=str(torch.__version__),
                     test_seeds=test_seeds, validation_seeds=validation_seeds,
                     excluded_seeds=sorted(excluded))
+    output.mkdir(parents=True, exist_ok=False)
     (output / 'config.json').write_text(json.dumps(dict(metadata, policy_config=policy_cfg), indent=2))
 
     def snapshot():
@@ -77,6 +57,17 @@ def main():
             discarded_chunks=discarded_chunks, elapsed=elapsed + time.monotonic() - started,
             best_score=best_score, best_actor=best_actor,
             **capture_rng(seed_rng, base.device))
+
+    def validate(end, phase, log):
+        nonlocal best_score, best_actor, last_eval_update
+        results = evaluate(policy, policy_cfg, validation_seeds, {'steered': agent.actor}, deadline=end)['steered']
+        score = record_validation(results, len(validation_seeds), phase, log, steps=steps, updates=updates)
+        if score is None:
+            return
+        last_eval_update = updates
+        if score > best_score:
+            best_score, best_actor = score, actor_snapshot(agent.actor)
+            save(best_path, {**metadata, 'actor': best_actor})
 
     from dexmani_sim import EpisodeRejected
     with (output / 'metrics.jsonl').open('a', buffering=1) as log, ExitStack() as environments:
@@ -138,25 +129,22 @@ def main():
             log.write(json.dumps(dict(steps=steps, chunks=chunks, updates=updates,
                 rollout_chunks=len(transitions), action_clip_fraction=torch.stack(clip_fractions).mean().item(),
                 **metrics)) + '\n')
-            if updates - last_eval_update >= cfg['eval_interval_updates']:
-                results = evaluate(policy, policy_cfg, validation_seeds, {'steered': agent.actor},
-                                   deadline=training_deadline)['steered']
-                if len(results) == len(validation_seeds):
-                    last_eval_update = updates
-                    score = float(np.mean([row['success'] for row in results]))
-                    log.write(json.dumps(dict(validation=results, success_rate=score, steps=steps)) + '\n')
-                    if score > best_score:
-                        best_score = score
-                        best_actor = {k: v.detach().cpu().clone() for k, v in agent.actor.state_dict().items()}
-                        save(output / 'best.pt', {**metadata, 'actor': best_actor})
+            if updates - last_eval_update >= cfg['eval_interval_updates'] and time.monotonic() < training_deadline:
+                validate(training_deadline, 'scheduled', log)
             save(output / 'resume.pt', snapshot())
+        environments.close()
+        if updates != last_eval_update and time.monotonic() < deadline:
+            end = selection_deadline(training_deadline, deadline, time.monotonic(),
+                                     len(validation_seeds), 2 * len(test_seeds))
+            validate(end, 'final', log)
         log.write(json.dumps(dict(steps=steps, chunks=chunks, updates=updates,
                                   discarded_chunks=discarded_chunks)) + '\n')
     save(output / 'last.pt', {**metadata, 'actor': agent.actor.state_dict()})
     save(output / 'resume.pt', snapshot())
     actor = agent.actor
     if best_actor is not None:
-        save(output / 'best.pt', {**metadata, 'actor': best_actor})
+        if not best_path.exists():
+            save(best_path, {**metadata, 'actor': best_actor})
         actor = copy.deepcopy(agent.actor)
         actor.load_state_dict(best_actor)
     policies = {'baseline': None}

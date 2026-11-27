@@ -1,14 +1,18 @@
 from contextlib import contextmanager
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 import pytest
 import torch
 from omegaconf import OmegaConf
 from dexmani_rl import train_dsrl as train, evaluate as evaluation
+from dexmani_rl.training import training_arguments
 
 
-@pytest.mark.parametrize('stop', ['complete', 'warmup', 'reset'])
+@pytest.mark.parametrize('stop', [
+    'complete', 'final_better', 'final_partial', 'warmup', 'reset', 'update_deadline',
+])
 def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, stop):
     cfg = OmegaConf.load('configs/dsrl.yaml')
     cfg.update(dict(width=8, depth=1, batch_size=2, utd=1, noise_updates=1,
@@ -16,6 +20,8 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
                     train_hours=1, max_hours=2))
     if stop == 'reset':
         cfg.warmup_steps = 0
+    if stop == 'update_deadline':
+        cfg.warmup_steps = 1
     config = tmp_path / 'config.yaml'
     OmegaConf.save(cfg, config)
     checkpoint = tmp_path / 'base.pt'
@@ -34,7 +40,7 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
 
     def step(action):
         assert stop != 'reset', 'Training continued after reset exhausted its budget'
-        if stop == 'warmup':
+        if stop in ('warmup', 'update_deadline'):
             clock[0] = 3601.
         return torch.zeros(1, 20), 0., True, False, dict(steps=1)
 
@@ -58,7 +64,12 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
                 assert updates, 'An untrained actor reached evaluation'
                 assert noise_magnitude == cfg.noise_magnitude
                 evaluated.append({k: v.clone() for k, v in actor.state_dict().items()})
-        return {name: [dict(seed=seed, success=False) for seed in seeds] for name in policies}
+        final_candidate = list(policies) == ['steered'] and len(updates) > 1
+        if stop == 'final_partial' and final_candidate:
+            assert deadline < 7200.
+            seeds = []
+        return {name: [dict(seed=seed, success=stop == 'final_better' and final_candidate)
+                       for seed in seeds] for name in policies}
 
     seed_calls = []
 
@@ -89,21 +100,35 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
         monkeypatch.setattr(sys, 'argv', argv)
         train.main()
         result = json.loads((output / 'evaluation.json').read_text())
-        if stop != 'complete':
-            assert not evaluated and not (output / 'best.pt').exists()
+        saved = torch.load(output / 'resume.pt', weights_only=False)
+        validations = [row for row in map(json.loads, (output / 'metrics.jsonl').read_text().splitlines())
+                       if 'validation' in row]
+        if stop in ('warmup', 'reset', 'update_deadline'):
+            assert not updates and not evaluated and not (output / 'best.pt').exists()
             assert result['rl_checkpoint'] is None and result['steered'] == []
             assert result['comparison']['episodes'] == 0
+            assert saved['actor_update_chunk'] == 0
+            if stop == 'update_deadline':
+                assert saved['steps'] == saved['replay']['size'] == 1
         else:
             assert result['rl_checkpoint'] == 'best.pt'
             best = torch.load(output / result['rl_checkpoint'], weights_only=False)['actor']
             last = torch.load(output / 'last.pt', weights_only=False)['actor']
             for key in best:
                 torch.testing.assert_close(best[key], evaluated[-1][key], atol=0, rtol=0)
-            assert any(not torch.equal(best[k], last[k]) for k in best)
-            resumed = torch.load(output / 'resume.pt', weights_only=False)
-            assert resumed['last_eval_chunk'] == 3
-            for key in last:
-                torch.testing.assert_close(last[key], resumed['model']['actor.' + key], atol=0, rtol=0)
+                torch.testing.assert_close(last[key], saved['model']['actor.' + key], atol=0, rtol=0)
+            assert all(torch.equal(best[key], last[key]) for key in best) == (stop == 'final_better')
+            assert saved['actor_update_chunk'] == 4
+            assert saved['last_eval_chunk'] == (3 if stop == 'final_partial' else 4)
+            phases = [row['validation_phase'] for row in validations]
+            if name == 'first':
+                assert phases == ['scheduled', 'final']
+            elif stop == 'final_partial':
+                assert phases == ['final']
+            else:
+                assert not phases
+            if validations:
+                assert validations[-1]['validation_complete'] == (stop != 'final_partial')
         previous = output
     if stop == 'complete':
         comparison = tmp_path / 'comparison.json'
@@ -113,3 +138,27 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
         for key in best:
             torch.testing.assert_close(best[key], evaluated[-1][key], atol=0, rtol=0)
         assert json.loads(comparison.read_text())['checkpoint'] == str(checkpoint)
+
+
+@pytest.mark.parametrize('algorithm', ['dsrl', 'rfs', 'robofft'])
+def test_default_config_from_other_working_directory(tmp_path, monkeypatch, algorithm):
+    expected = OmegaConf.to_container(OmegaConf.load(Path('configs') / f'{algorithm}.yaml'), resolve=True)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, 'argv', ['train', '--checkpoint', 'base.pt', '--output', 'run'])
+    args, cfg, checkpoint, weights, saved = training_arguments(algorithm)
+    assert args.output == Path('run')
+    assert cfg == expected
+    assert checkpoint == str(tmp_path / 'base.pt')
+    assert weights is saved is None
+
+
+def test_resume_rejects_actor_export_before_initialization(tmp_path, monkeypatch, capsys):
+    export = tmp_path / 'best.pt'
+    torch.save({'algorithm': 'dsrl', 'actor': {}}, export)
+    output = tmp_path / 'run'
+    monkeypatch.setattr(sys, 'argv', ['train_dsrl', '--resume', str(export), '--output', str(output)])
+    with pytest.raises(SystemExit) as error:
+        train.main()
+    assert error.value.code == 2
+    assert 'training snapshot (resume.pt)' in capsys.readouterr().err
+    assert not output.exists()

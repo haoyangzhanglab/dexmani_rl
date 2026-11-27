@@ -14,8 +14,7 @@ def mlp(input_dim, output_dim, hidden_dims):
 
 
 class Actor(nn.Module):
-    def __init__(self, state_dim, noise_dim, action_dim,
-                 hidden_dims=(256, 128, 64), residual_scale=0.1):
+    def __init__(self, state_dim, noise_dim, action_dim, hidden_dims, residual_scale):
         super().__init__()
         self.noise_dim = noise_dim
         self.residual_scale = residual_scale
@@ -72,8 +71,8 @@ class RFS(nn.Module):
                 not 0 < cfg['clip_coef'] < 1):
             raise ValueError('Invalid RFS hyperparameters')
         self.cfg = cfg
-        self.actor = Actor(state_dim, noise_dim, action_dim, cfg['hidden_dims'], cfg['residual_scale'])
-        self.value = mlp(state_dim, 1, cfg['hidden_dims'])
+        self.actor = Actor(state_dim, noise_dim, action_dim, hidden_dims, cfg['residual_scale'])
+        self.value = mlp(state_dim, 1, hidden_dims)
         self.to(device)
         self.optimizer = torch.optim.Adam([
             {'params': self.actor.parameters(), 'lr': cfg['actor_lr']},
@@ -94,20 +93,20 @@ class RFS(nn.Module):
         advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + 1e-8)
         totals = dict(loss=0., actor_loss=0., value_loss=0., entropy=0.,
                       approx_kl=0., clip_fraction=0., grad_norm=0.)
-        samples = 0
-        parameters = list(self.actor.parameters()) + list(self.value.parameters())
+        parameters = list(self.parameters())
         for _ in range(cfg['update_epochs']):
             order = torch.randperm(count, device=device)
             for indices in order.split(cfg['batch_size']):
-                distribution = self.actor.distribution(b['state'][indices])
+                state, adv = b['state'][indices], advantage[indices]
+                distribution = self.actor.distribution(state)
                 # PPO 的动作是原始联合采样，不是经过 residual 缩放或物理限位的动作。
                 log_prob = distribution.log_prob(b['joint'][indices]).sum(-1, keepdim=True)
                 log_ratio = log_prob - b['log_prob'][indices]
                 ratio = log_ratio.exp()
-                unclipped = -advantage[indices] * ratio
-                clipped = -advantage[indices] * ratio.clamp(1 - cfg['clip_coef'], 1 + cfg['clip_coef'])
+                unclipped = -adv * ratio
+                clipped = -adv * ratio.clamp(1 - cfg['clip_coef'], 1 + cfg['clip_coef'])
                 actor_loss = torch.maximum(unclipped, clipped).mean()
-                value_loss = F.mse_loss(self.value(b['state'][indices]), returns[indices])
+                value_loss = F.mse_loss(self.value(state), returns[indices])
                 entropy = distribution.entropy().sum(-1).mean()
                 loss = actor_loss + cfg['value_coef'] * value_loss - cfg['entropy_coef'] * entropy
                 if not torch.isfinite(loss):
@@ -124,7 +123,7 @@ class RFS(nn.Module):
                                   grad_norm=grad_norm)
                     for name, metric in values.items():
                         totals[name] += metric.item() * len(indices)
-                    samples += len(indices)
+        samples = count * cfg['update_epochs']
         metrics = {name: total / samples for name, total in totals.items()}
         std = self.actor.log_std.detach().exp()
         metrics['noise_std'] = std[:self.actor.noise_dim].mean().item()

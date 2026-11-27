@@ -34,7 +34,8 @@ class Critics(nn.Module):
         self.q = nn.ModuleList([mlp(state_dim + action_dim, 1, width, depth) for _ in range(2)])
 
     def forward(self, state, action):
-        return torch.cat([q(torch.cat((state, action), -1)) for q in self.q], -1)
+        features = torch.cat((state, action), -1)
+        return torch.cat([q(features) for q in self.q], -1)
 
 
 def td_target(reward, terminated, next_q, log_prob, alpha, gamma):
@@ -44,6 +45,14 @@ def td_target(reward, terminated, next_q, log_prob, alpha, gamma):
 class DSRL(nn.Module):
     def __init__(self, base, cfg):
         super().__init__()
+        if (any(type(cfg[key]) is not int or cfg[key] <= 0 for key in ('width', 'batch_size', 'utd')) or
+                any(type(cfg[key]) is not int or cfg[key] < 0 for key in ('depth', 'noise_updates'))):
+            raise ValueError('Invalid DSRL network size or update counts')
+        numeric = ('lr', 'noise_magnitude', 'gamma', 'tau')
+        if (any(type(cfg[key]) not in (int, float) or not math.isfinite(cfg[key]) for key in numeric) or
+                cfg['lr'] <= 0 or cfg['noise_magnitude'] <= 0 or
+                not 0 < cfg['gamma'] <= 1 or not 0 < cfg['tau'] <= 1):
+            raise ValueError('Invalid DSRL hyperparameters')
         self.base, self.cfg = base, cfg
         args = (cfg['width'], cfg['depth'])
         self.actor = Actor(base.state_dim, base.noise_dim, *args)
@@ -71,9 +80,9 @@ class DSRL(nn.Module):
 
     def update(self, replay):
         cfg = self.cfg
-        metrics = {}
         for _ in range(cfg['utd']):
-            b = replay.sample(cfg['batch_size'], self.base.device)
+            b = replay.sample(cfg['batch_size'], self.base.device, fields=(
+                'state', 'action', 'next_state', 'next_context', 'reward', 'terminated'))
             u, logp = self.actor.sample(b['state'])
             alpha = self.log_alpha.detach().exp()
             self.optimize(self.optimizers['alpha'], -(self.log_alpha * logp.detach()).mean())
@@ -91,9 +100,9 @@ class DSRL(nn.Module):
             with torch.no_grad():
                 for target, current in zip(self.target.parameters(), self.critic.parameters()):
                     target.lerp_(current, cfg['tau'])
-            metrics.update(critic_loss=q_loss.item(), actor_loss=actor_loss.item(), alpha=alpha.item())
+        metrics = dict(critic_loss=q_loss.item(), actor_loss=actor_loss.item(), alpha=alpha.item())
         for _ in range(cfg['noise_updates']):
-            b = replay.sample(cfg['batch_size'], self.base.device)
+            b = replay.sample(cfg['batch_size'], self.base.device, fields=('state', 'context'))
             with torch.no_grad():
                 w = torch.randn(len(b['state']), self.base.noise_dim, device=self.base.device)
                 a = self.base.actions(b['context'], w)
@@ -101,5 +110,6 @@ class DSRL(nn.Module):
             prediction = self.noise_critic(b['state'], w / cfg['noise_magnitude'])
             loss = 0.5 * (prediction - teacher).square().mean(0).sum()
             self.optimize(self.optimizers['noise_critic'], loss)
+        if cfg['noise_updates']:
             metrics['noise_loss'] = loss.item()
         return metrics

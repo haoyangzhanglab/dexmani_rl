@@ -27,13 +27,14 @@ def assert_same_state(actual, expected):
 
 
 @pytest.mark.parametrize('stop,expected_batches', [
-    ('complete', [2, 2]), ('total_steps', [2, 1]),
+    ('complete', [2, 2]), ('total_steps', [2, 1]), ('final', [2, 2]),
     ('reset', []), ('partial_rollout', []),
 ])
 def test_rfs_training_budget_resume_and_export(tmp_path, monkeypatch, stop, expected_batches):
     cfg = OmegaConf.load('configs/rfs.yaml')
     cfg.update(dict(hidden_dims=[8], rollout_steps=2, batch_size=2, update_epochs=2,
-                    total_steps=3 if stop == 'total_steps' else 4, eval_interval_updates=1,
+                    total_steps=3 if stop == 'total_steps' else 4,
+                    eval_interval_updates=3 if stop == 'final' else 1,
                     train_hours=1, max_hours=2))
     config = tmp_path / 'config.yaml'
     OmegaConf.save(cfg, config)
@@ -69,13 +70,15 @@ def test_rfs_training_budget_resume_and_export(tmp_path, monkeypatch, stop, expe
         yield SimpleNamespace(env=SimpleNamespace(robot=SimpleNamespace(qlimits=[])),
                               reset=reset, step=step)
 
-    updates, evaluated = [], []
+    updates, evaluated, best_writes = [], [], []
     original_update = train.RFS.update
     original_save = train.save
     midway = tmp_path / 'midway.pt'
 
     def save(path, value):
         original_save(path, value)
+        if path.name == 'best.pt':
+            best_writes.append(path.parent)
         if stop == 'complete' and path.name == 'resume.pt' and value['updates'] == 1 and not midway.exists():
             original_save(midway, value)
 
@@ -139,6 +142,7 @@ def test_rfs_training_budget_resume_and_export(tmp_path, monkeypatch, stop, expe
             assert result['comparison']['episodes'] == 0
             assert saved['steps'] == (1 if stop == 'partial_rollout' else 0)
         else:
+            assert best_writes.count(output) == 1
             assert saved['optimizer']['state']
             assert saved['last_eval_update'] == len(expected_batches)
             assert result['rl_checkpoint'] == 'best.pt'
@@ -149,6 +153,15 @@ def test_rfs_training_budget_resume_and_export(tmp_path, monkeypatch, stop, expe
             assert any(not torch.equal(updates[0][1][key], last[key]) for key in last)
             if stop == 'complete':
                 assert any(not torch.equal(best[key], last[key]) for key in best)
+            elif stop == 'final':
+                assert_same_state(best, last)
+                validations = [row for row in map(json.loads, (output / 'metrics.jsonl').read_text().splitlines())
+                               if 'validation' in row]
+                if name == 'first':
+                    assert [row['validation_phase'] for row in validations] == ['final']
+                    assert validations[0]['validation_complete']
+                else:
+                    assert not validations
         previous_output, previous_resume = output, saved
 
     assert len(environment_steps) == (0 if stop == 'reset' else 1 if stop == 'partial_rollout' else cfg.total_steps)
