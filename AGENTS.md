@@ -6,7 +6,7 @@
 
 ## 项目入口与上下文
 
-- 当前实现为冻结 FlowMatch 的 DSRL-NA，使用 `dexmani_sim` 交互；入口为 `dexmani_rl.train` 和 `dexmani_rl.evaluate`，配置在 `configs/dsrl.yaml`，验证命令见 `README.md`。
+- 当前实现为冻结 FlowMatch 的 DSRL-NA 与 RFS-PPO，使用 `dexmani_sim` 交互；训练入口分别为 `dexmani_rl.train_dsrl` 和 `dexmani_rl.train_rfs`，共用 `dexmani_rl.evaluate`，配置在 `configs/dsrl.yaml` 和 `configs/rfs.yaml`，验证命令见 `README.md`。
 - 引入实现时，同步记录实际环境、训练、评估和验证命令；不要编造路径或命令，也不要提前搭建空框架。
 - 按需阅读相关实现、调用方、配置和文档；先用 `rg` 定位，避免全量加载无关文件、日志和数据。
 - 相邻的 `../dexmani_policy` 是预训练策略及协作规范的参考仓库。需要对接时先检查其实际接口；跨仓库修改须在当前任务授权范围内，不直接复制其依赖或硬编码机器路径。

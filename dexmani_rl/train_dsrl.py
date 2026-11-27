@@ -11,12 +11,7 @@ from .dsrl import DSRL
 from .replay import Replay
 from .env import make_env, seed_split
 from .evaluate import evaluate, compare
-
-
-def save(path, value):
-    temporary = path.with_suffix('.tmp')
-    torch.save(value, temporary)
-    temporary.replace(path)
+from .checkpoint import save, capture_rng, restore_rng
 
 
 def main():
@@ -34,6 +29,8 @@ def main():
         if args.config or args.weights:
             parser.error('--resume uses the saved config and weight selection')
         saved = torch.load(args.resume, map_location='cpu', weights_only=False)
+        if saved['algorithm'] != 'dsrl':
+            raise ValueError('Requires a DSRL resume checkpoint')
         cfg, checkpoint, weights = (saved[k] for k in ('config', 'base_checkpoint', 'weights'))
     else:
         cfg = OmegaConf.to_container(OmegaConf.load(args.config or 'configs/dsrl.yaml'), resolve=True)
@@ -47,7 +44,11 @@ def main():
     started = time.monotonic()
     torch.manual_seed(cfg['seed'])
     policy, policy_cfg, weights = load_policy(checkpoint, args.device, weights)
-    test_seeds, validation_seeds, excluded = seed_split(policy_cfg['env_runner']['task_name'])
+    if saved is None:
+        test_seeds, validation_seeds, excluded = seed_split(policy_cfg['env_runner']['task_name'])
+    else:
+        test_seeds, validation_seeds = saved['test_seeds'], saved['validation_seeds']
+        excluded = set(saved['excluded_seeds'])
     replay = Replay(cfg['replay_capacity'])
     steps, chunks, last_eval_chunk, elapsed, best_score = 0, 0, 0, 0., -1.
     best_actor = None
@@ -57,31 +58,28 @@ def main():
         agent = DSRL(base, cfg)
     if saved is not None:
         agent.load_state_dict(saved['model'])
-        for optimizer, state in zip(agent.optimizers, saved['optimizers']):
-            optimizer.load_state_dict(state)
+        for name, optimizer in agent.optimizers.items():
+            optimizer.load_state_dict(saved['optimizers'][name])
         replay.load_state_dict(saved['replay'])
         steps, chunks, last_eval_chunk, elapsed = (saved[k] for k in ('steps', 'chunks', 'last_eval_chunk', 'elapsed'))
         best_score = saved['best_score']
         best_actor = saved['best_actor']
-        torch.set_rng_state(saved['torch_rng'])
-        if base.device.type == 'cuda' and saved['cuda_rng'] is not None:
-            torch.cuda.set_rng_state(saved['cuda_rng'], base.device)
-        seed_rng.bit_generator.state = saved['seed_rng']
+        restore_rng(saved, seed_rng, base.device)
         del saved
     deadline = started + max(0, cfg['max_hours'] * 3600 - elapsed)
     training_deadline = started + max(0, cfg['train_hours'] * 3600 - elapsed)
-    metadata = dict(config=cfg, base_checkpoint=checkpoint, weights=weights,
-                    policy_config=policy_cfg, torch=torch.__version__,
-                    test_seeds=test_seeds, validation_seeds=validation_seeds)
-    (output / 'config.json').write_text(json.dumps(metadata, indent=2))
+    metadata = dict(algorithm='dsrl', config=cfg, base_checkpoint=checkpoint, weights=weights,
+                    torch=str(torch.__version__),
+                    test_seeds=test_seeds, validation_seeds=validation_seeds,
+                    excluded_seeds=sorted(excluded))
+    (output / 'config.json').write_text(json.dumps(dict(metadata, policy_config=policy_cfg), indent=2))
 
     def snapshot():
         return dict(metadata, model=agent.state_dict(),
-            optimizers=[o.state_dict() for o in agent.optimizers], replay=replay.state_dict(),
+            optimizers={name: optimizer.state_dict() for name, optimizer in agent.optimizers.items()}, replay=replay.state_dict(),
             steps=steps, chunks=chunks, last_eval_chunk=last_eval_chunk,
             elapsed=elapsed + time.monotonic() - started, best_score=best_score, best_actor=best_actor,
-            seed_rng=seed_rng.bit_generator.state, torch_rng=torch.get_rng_state(),
-            cuda_rng=torch.cuda.get_rng_state(base.device) if base.device.type == 'cuda' else None)
+            **capture_rng(seed_rng, base.device))
 
     from dexmani_sim import EpisodeRejected
     with (output / 'metrics.jsonl').open('a', buffering=1) as log:
@@ -116,15 +114,15 @@ def main():
                         context, state = next_context, next_state
                         if done or truncated:
                             break
-                    if steps >= cfg['warmup_steps'] and chunks - last_eval_chunk >= cfg['eval_interval']:
-                        results = evaluate(policy, policy_cfg, validation_seeds, {'dsrl': agent.actor},
-                            noise_magnitude=cfg['noise_magnitude'], deadline=training_deadline)['dsrl']
+                    if steps >= cfg['warmup_steps'] and chunks - last_eval_chunk >= cfg['eval_interval_chunks']:
+                        results = evaluate(policy, policy_cfg, validation_seeds, {'steered': agent.actor},
+                            noise_magnitude=cfg['noise_magnitude'], deadline=training_deadline)['steered']
                         if len(results) == len(validation_seeds):
                             last_eval_chunk = chunks
-                            score = np.mean([r['success'] for r in results])
-                            log.write(json.dumps(dict(validation=results, success_rate=float(score), steps=steps)) + '\n')
+                            score = float(np.mean([r['success'] for r in results]))
+                            log.write(json.dumps(dict(validation=results, success_rate=score, steps=steps)) + '\n')
                             if score > best_score:
-                                best_score = float(score)
+                                best_score = score
                                 best_actor = {k: v.detach().cpu().clone() for k, v in agent.actor.state_dict().items()}
                                 save(output / 'best.pt', {**metadata, 'actor': best_actor})
             save(output / 'resume.pt', snapshot())
@@ -138,11 +136,11 @@ def main():
     evaluated_checkpoint = ('best.pt' if best_actor is not None else 'last.pt') if has_updates else None
     policies = {'baseline': None}
     if has_updates:
-        policies['dsrl'] = actor
+        policies['steered'] = actor
     results = evaluate(policy, policy_cfg, test_seeds, policies,
                        noise_magnitude=cfg['noise_magnitude'], deadline=deadline)
-    baseline, steered = results['baseline'], results['dsrl'] if has_updates else []
-    result = dict(dsrl_checkpoint=evaluated_checkpoint, baseline=baseline, dsrl=steered,
+    baseline, steered = results['baseline'], results['steered'] if has_updates else []
+    result = dict(algorithm='dsrl', rl_checkpoint=evaluated_checkpoint, baseline=baseline, steered=steered,
                   comparison=compare(baseline, steered) if has_updates else {'episodes': 0})
     (output / 'evaluation.json').write_text(json.dumps(result, indent=2))
     save(output / 'resume.pt', snapshot())

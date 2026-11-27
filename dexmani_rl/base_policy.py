@@ -29,14 +29,18 @@ def load_policy(path, device, weights=None):
     return policy, cfg, weights
 
 
+def policy_dimensions(policy):
+    return (policy.n_obs_steps * (policy.obs_encoder.out_dim + 19),
+            policy.horizon * policy.action_dim,
+            policy.n_action_steps * policy.action_dim)
+
+
 class FrozenPolicy:
     def __init__(self, policy, cfg, limits, decode_batch=64):
         self.policy, self.cfg, self.decode_batch = policy, cfg, decode_batch
         self.device = next(policy.parameters()).device
-        self.state_dim = policy.n_obs_steps * (policy.obs_encoder.out_dim + 19)
+        self.state_dim, self.noise_dim, self.action_dim = policy_dimensions(policy)
         self.limits = torch.as_tensor(limits, device=self.device, dtype=torch.float32)
-        self.noise_dim = policy.horizon * policy.action_dim
-        self.action_dim = policy.n_action_steps * policy.action_dim
 
     @torch.no_grad()
     def encode(self, obs):
@@ -49,14 +53,22 @@ class FrozenPolicy:
         return context, state
 
     @torch.no_grad()
-    def actions(self, context, noise):
+    def actions(self, context, noise, residual=None, *, return_clip_fraction=False):
         chunks = []
         for c, w in zip(context.split(self.decode_batch), noise.split(self.decode_batch)):
             action = self.policy.decode_condition(c, w.reshape(-1, self.policy.horizon, self.policy.action_dim),
                                                   self.cfg['eval']['inference_steps'])
-            chunks.append(action[:, :self.policy.n_action_steps].clamp(self.limits[:, 0], self.limits[:, 1]))
-        physical = torch.cat(chunks)
-        return self.policy.normalizer['action'].normalize(physical).flatten(1)
+            chunks.append(action[:, :self.policy.n_action_steps])
+        normalized = torch.cat(chunks)
+        if residual is not None:
+            normalized = normalized + residual.reshape_as(normalized)
+        normalizer = self.policy.normalizer['action']
+        physical = normalizer.unnormalize(normalized)
+        clipped = physical.clamp(self.limits[:, 0], self.limits[:, 1])
+        actions = normalizer.normalize(clipped).flatten(1)
+        if return_clip_fraction:
+            return actions, (physical != clipped).float().mean()
+        return actions
 
     def physical(self, actions):
         return self.policy.normalizer['action'].unnormalize(actions.reshape(-1, self.policy.n_action_steps, self.policy.action_dim))

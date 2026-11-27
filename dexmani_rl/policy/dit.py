@@ -37,20 +37,9 @@ class FlowTimestepEmbedding(nn.Module):
         super().__init__()
         if dim <= 0 or dim % 2:
             raise ValueError("flow embedding dimension must be positive and even")
-        self.half_dim = dim // 2
-        self.register_buffer("frequencies", self._frequencies(), persistent=False)
-
-    def _frequencies(self, device=None):
-        fraction = torch.linspace(0, 1, self.half_dim, device=device, dtype=torch.float32)
+        fraction = torch.linspace(0, 1, dim // 2, dtype=torch.float32)
         period = 0.004 * (4.0 / 0.004) ** fraction
-        return 2 * math.pi / period
-
-    def _apply(self, fn, recurse=True):
-        super()._apply(fn, recurse)
-        # Rebuild after dtype conversion: casting rounded BF16 frequencies back
-        # to FP32 would retain phase errors at the shortest periods.
-        self.frequencies = self._frequencies(self.frequencies.device)
-        return self
+        self.register_buffer("frequencies", 2 * math.pi / period, persistent=False)
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         angles = timestep.float()[:, None] * self.frequencies[None, :]

@@ -1,0 +1,19 @@
+seed: 42
+hidden_dims: [256, 128, 64]
+actor_lr: 0.0003
+value_lr: 0.001
+rollout_steps: 2048
+batch_size: 1024
+update_epochs: 10
+gamma: 0.99
+gae_lambda: 0.95
+clip_coef: 0.2
+value_coef: 0.5
+entropy_coef: 0.0
+max_grad_norm: 1.0
+residual_scale: 0.1
+decode_batch: 64
+total_steps: 200000
+eval_interval_updates: 5
+max_hours: 24
+train_hours: 23

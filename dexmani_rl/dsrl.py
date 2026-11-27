@@ -52,8 +52,12 @@ class DSRL(nn.Module):
         self.noise_critic = Critics(base.state_dim, base.noise_dim, *args)
         self.log_alpha = nn.Parameter(torch.zeros(()))
         self.to(base.device)
-        self.optimizers = [torch.optim.Adam(params, lr=cfg['lr']) for params in (
-            self.actor.parameters(), self.critic.parameters(), self.noise_critic.parameters(), [self.log_alpha])]
+        self.optimizers = {
+            'actor': torch.optim.Adam(self.actor.parameters(), lr=cfg['lr']),
+            'critic': torch.optim.Adam(self.critic.parameters(), lr=cfg['lr']),
+            'noise_critic': torch.optim.Adam(self.noise_critic.parameters(), lr=cfg['lr']),
+            'alpha': torch.optim.Adam([self.log_alpha], lr=cfg['lr']),
+        }
 
     @staticmethod
     def optimize(optimizer, loss):
@@ -72,17 +76,17 @@ class DSRL(nn.Module):
             b = replay.sample(cfg['batch_size'], self.base.device)
             u, logp = self.actor.sample(b['state'])
             alpha = self.log_alpha.detach().exp()
-            self.optimize(self.optimizers[3], -(self.log_alpha * logp.detach()).mean())
+            self.optimize(self.optimizers['alpha'], -(self.log_alpha * logp.detach()).mean())
             with torch.no_grad():
                 next_u, next_logp = self.actor.sample(b['next_state'])
                 next_a = self.base.actions(b['next_context'], cfg['noise_magnitude'] * next_u)
                 y = td_target(b['reward'], b['terminated'], self.target(b['next_state'], next_a),
                               next_logp, alpha, cfg['gamma'])
             q_loss = 0.5 * (self.critic(b['state'], b['action']) - y).square().mean(0).sum()
-            self.optimize(self.optimizers[1], q_loss)
+            self.optimize(self.optimizers['critic'], q_loss)
             self.noise_critic.requires_grad_(False)
             actor_loss = (alpha * logp - self.noise_critic(b['state'], u).min(-1, keepdim=True).values).mean()
-            self.optimize(self.optimizers[0], actor_loss)
+            self.optimize(self.optimizers['actor'], actor_loss)
             self.noise_critic.requires_grad_(True)
             with torch.no_grad():
                 for target, current in zip(self.target.parameters(), self.critic.parameters()):
@@ -96,6 +100,6 @@ class DSRL(nn.Module):
                 teacher = self.critic(b['state'], a)
             prediction = self.noise_critic(b['state'], w / cfg['noise_magnitude'])
             loss = 0.5 * (prediction - teacher).square().mean(0).sum()
-            self.optimize(self.optimizers[2], loss)
+            self.optimize(self.optimizers['noise_critic'], loss)
             metrics['noise_loss'] = loss.item()
         return metrics

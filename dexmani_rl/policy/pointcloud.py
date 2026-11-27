@@ -10,7 +10,6 @@ from torch import nn
 def build_mlp(
     channels: list[int],
     *,
-    activation: type[nn.Module] = nn.GELU,
     normalize: bool = True,
     activate_last: bool = False,
 ) -> nn.Sequential:
@@ -21,7 +20,7 @@ def build_mlp(
         if index < len(channels) - 2 or activate_last:
             if normalize:
                 layers.append(nn.LayerNorm(out_dim))
-            layers.append(activation())
+            layers.append(nn.GELU())
     return nn.Sequential(*layers)
 
 

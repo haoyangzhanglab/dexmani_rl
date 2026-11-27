@@ -21,7 +21,7 @@ class RectifiedFlow(nn.Module):
         if type(steps) is not int or steps <= 0:
             raise ValueError('inference_steps must be positive')
         sample = (torch.randn(action_shape, device=cond.device, dtype=torch.float32, generator=generator)
-                  if initial_noise is None else initial_noise.clone())
+                  if initial_noise is None else initial_noise)
         if tuple(sample.shape) != tuple(action_shape):
             raise ValueError('initial_noise must cover the complete prediction horizon')
         context_kv = self.model.prepare_context_kv(cond) if steps > 1 else None
@@ -108,10 +108,6 @@ class FlowMatch(nn.Module):
         self.normalization_dims = dict(feature_dims)
         self.normalizer = LinearNormalizer(feature_shapes)
 
-    @property
-    def action_start_index(self):
-        return self.n_obs_steps - 1
-
     @torch.no_grad()
     def encode_observations(self, obs):
         values = {}
@@ -125,12 +121,14 @@ class FlowMatch(nn.Module):
 
     @torch.no_grad()
     def decode_condition(self, condition, initial_noise=None, inference_steps=None, generator=None):
+        """Decode the normalized future window, excluding observation history."""
         prediction = self.action_decoder.predict_action(
             condition, (len(condition), self.horizon, self.action_dim),
             inference_steps=inference_steps, initial_noise=initial_noise, generator=generator)
-        return self.normalizer['action'].unnormalize(prediction)[:, self.action_start_index:]
+        return prediction[:, self.n_obs_steps - 1:]
 
     @torch.no_grad()
     def predict_action(self, obs_dict, inference_steps=None, *, generator=None, initial_noise=None):
-        return {'future_actions': self.decode_condition(
-            self.encode_observations(obs_dict), initial_noise, inference_steps, generator)}
+        prediction = self.decode_condition(
+            self.encode_observations(obs_dict), initial_noise, inference_steps, generator)
+        return {'future_actions': self.normalizer['action'].unnormalize(prediction)}

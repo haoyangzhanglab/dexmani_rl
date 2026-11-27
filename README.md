@@ -1,107 +1,100 @@
 # DexMani RL
 
-冻结 FlowMatch，通过 DSRL-NA 学习初始噪声分布。只实现在线后训练：双动作 Q、双噪声 Q 蒸馏、squashed Gaussian actor 和自动熵温度。基础策略、观测编码器及 normalizer 全部冻结。
+冻结 FlowMatch，在 `dexmani_sim` 中比较两个在线后训练 baseline：DSRL-NA 学习初始噪声，RFS-PPO 联合学习初始噪声与动作残差。基础策略、视觉编码器和 normalizer 均冻结，推理统一使用 FP32。当前完成算法与训练链路实现，尚缺真实预训练 BC checkpoint，未验证成功率提升。
 
 ## 来源与结构
 
-- [DSRL 论文](https://arxiv.org/html/2506.15799v2)、[官方实现](https://github.com/ajwagen/stable-baselines3-dsrl/blob/10e5d311b5c42fe571ff3eeb72f622ca616a149d/stable_baselines3/dsrl/dsrl.py)。按其更新方程独立实现 PyTorch 训练循环，不依赖 SB3 或 DPPO。
-- `policy/` 的 FlowMatch 推理依赖来自 `dexmani_policy` 提交 `8031c85e99a11e7b93451dedbfa291fc2eaf07ca`。保留模块权重名称，仅保留当前 FlowMatch 的推理路径；点云采样固定为确定性 FPS，视觉编码只返回场景融合使用的 patch tokens。
-- 仿真对接检查基于 `dexmani_sim` 提交 `64abf055af5ceca1e86294a63776c1eb77ea7e92`；未修改两个相邻仓库。
-
-核心模块直接按研究流程组织：
+- [DSRL 论文](https://arxiv.org/html/2506.15799v2)及[官方实现](https://github.com/ajwagen/stable-baselines3-dsrl/blob/10e5d311b5c42fe571ff3eeb72f622ca616a149d/stable_baselines3/dsrl/dsrl.py)：独立实现更新方程，不依赖 SB3 或 DPPO。
+- [RFS 论文](https://arxiv.org/html/2602.01789v3)及[项目主页](https://weirdlabuw.github.io/rfs/)：按论文实现在线联合调制与 PPO；调研时官方代码尚未公开。本仓库适配 xArm7+XHand 和冻结视觉特征，不包含论文的特权状态教师、蒸馏、离线 TD3+BC、六任务环境或真机流程。
+- 冻结推理代码来自 `dexmani_policy@8031c85e99a11e7b93451dedbfa291fc2eaf07ca`，仿真接口基于 `dexmani_sim@64abf055af5ceca1e86294a63776c1eb77ea7e92`；相邻两个仓库未修改。
 
 | 模块 | 职责 |
 | --- | --- |
-| `train.py` | 采集、更新、选模、恢复与累计时间预算 |
-| `evaluate.py` | 单回合 rollout、按 seed 配对评估与统计 |
-| `dsrl.py` | actor、双动作 Q、双噪声 Q 与更新方程 |
-| `replay.py` | CPU replay，保存冻结特征和动作块转移 |
-| `env.py` | `dexmani_sim` 生命周期、观测历史与动作块执行 |
-| `base_policy.py` | checkpoint 加载、冻结特征和动作空间映射 |
+| `train_dsrl.py`、`train_rfs.py` | 各自独立的采集、更新、选模、保存与恢复循环 |
+| `dsrl.py`、`rfs.py` | 各算法的网络与更新方程 |
+| `evaluate.py` | rollout、同 seed 配对评估及统计 |
+| `env.py` | 仿真生命周期、观测历史和动作块执行 |
+| `base_policy.py` | BC 加载、冻结特征、动作映射与策略维度 |
+| `replay.py` | DSRL 的 CPU float32 replay |
+| `checkpoint.py` | 仅 `save`、`capture_rng`、`restore_rng` 三个函数 |
 
-`policy/` 只保留 8 个实现模块，不再沿用预训练仓库的多层目录和基类：
+`policy/` 保留 8 个实际推理模块：`flowmatch`、`dit`、`encoder`、`pointcloud`、`vision`、`fusion`、`normalizer`、`preprocess`。标准/factorized DiTX、DINO/DINOv3/SigLIP 和 LoRA 的 checkpoint 权重名称与配置保持支持。DSRL 的优化器按 `actor`、`critic`、`noise_critic`、`alpha` 命名保存；RFS 只接收状态、噪声、动作维度与配置/device，不持有基础策略。没有共用 trainer 或兼容层。
 
-```text
-policy/
-├── flowmatch.py   # 观测归一化、完整噪声窗口、Euler 积分与动作切片
-├── dit.py         # DiTX、时间嵌入、factorized arm/hand action tokens
-├── encoder.py     # 场景 token 与关节历史编码
-├── pointcloud.py  # FPS、局部几何和空间注意力
-├── vision.py      # DINO / DINOv3 / SigLIP 与图像处理
-├── fusion.py      # 相机投影与 RGB/点云融合
-├── normalizer.py  # checkpoint 中的仿射归一化
-└── preprocess.py  # 原始仿真观测的形状、类型与张量布局
-```
+观测历史由 `ChunkEnv` 补齐和堆叠；冻结编码器输出完整 flow context，以及每帧场景 token 均值和关节历史组成的 RL state。DSRL 保存冻结 context/state 到 replay；RFS 保存当轮状态、原始联合采样、log-prob、价值与转移，不使用 replay。两者更新时均不重新编码图像。
 
-`ChunkEnv` 独自维护、补齐并堆叠最近的观测；预处理直接接收 `[T,...]`。冻结编码器产生完整 context 和汇总后的 RL state：actor 从 state 采样噪声，FlowMatch 用 context 和噪声生成动作，`FrozenPolicy` 裁剪物理限位并转换到动作 Q 的归一化空间。执行结果和冻结特征进入 replay，只有 DSRL 网络参与更新。
+## 环境与 BC 权重
 
-带相机标定的 RGB 保持原始分辨率，缩放只在 `vision.py` 的 `ImageProcessor` 中进行，并同步生成半像素投影变换。与上游 FlowMatch 数据集约束一致，checkpoint 的 `dataset.rgb_preprocess_size`、`rgb_random_crop_size`、`rgb_color_aug` 必须未设置或为 `null`；图像尺寸通过 `agent.rgb_backbone_config.image_size` 配置。
-
-保留 checkpoint 的模块属性和 `state_dict` 参数名，标准/factorized 解码与三种视觉骨干（含 LoRA）沿用当前配置。
-
-## 环境
-
-已验证：Python 3.10、PyTorch 2.4.1+cu124、torchvision 0.19.1、NumPy 1.26.4、SciPy 1.15.3、SAPIEN 3.0.0b1、mplib 0.2.1、PyTorch3D 0.7.8、transformers 4.48.0、timm 1.0.22，RTX 4090 24 GB。现有 conda `policy` 环境可直接运行。
+使用现有 conda `policy` 环境：Python 3.10、PyTorch 2.4.1+cu124、torchvision 0.19.1、NumPy 1.26.4、SciPy 1.15.3、SAPIEN 3.0.0b1、mplib 0.2.1、PyTorch3D 0.7.8、transformers 4.48.0、timm 1.0.22；GPU 为 RTX 4090 24 GB。
 
 ```bash
 conda activate policy
+# 可选；在仓库根目录也可直接运行模块
 python -m pip install -e . --no-deps
 ```
 
-上面的 editable 安装是可选步骤；在本仓库根目录可直接运行模块。`dexmani_sim` 必须已安装并具备任务资产与评估种子池，PyTorch3D 必须与 PyTorch/CUDA 匹配；这些环境组件不由本项目自动重装。运行时无需安装 `dexmani_policy`。LoRA 视觉 checkpoint 额外需要 `peft`。
+`dexmani_sim` 需已安装并具备任务资产和评估种子池；PyTorch3D 需与 PyTorch/CUDA 匹配。运行不依赖安装 `dexmani_policy`；LoRA 权重额外需要 `peft`。
 
-## 训练与评估
+BC checkpoint 格式不变：包含 `effective_config`、`model_state` 和可选 `ema_model_state`，动作键为 `action`，输出19维绝对关节目标（弧度）。EMA/raw 默认遵循 checkpoint 配置，指定权重缺失时显式失败。加载使用原始参数名和 normalizer，不下载视觉权重、不读取示教集或重新拟合统计量。
 
-需要当前 FlowMatch 格式的真实 BC checkpoint，内含 `effective_config`、`model_state` 和可选 `ema_model_state`。EMA/raw 默认遵循 checkpoint 配置；缺失请求的权重时显式报错。推理恢复不下载外部视觉权重、不读取示教集，也不重新拟合 normalizer。
+带标定的 RGB 保持原始分辨率；`dataset.rgb_preprocess_size`、`rgb_random_crop_size`、`rgb_color_aug` 必须未设置或为 `null`。缩放通过 `agent.rgb_backbone_config.image_size` 配置，投影同步使用半像素变换。
 
-以下 `PATH_TO_BC.pt` 为待提供的权重路径，命令用于正式实验，尚未执行性能训练：
+## 算法与默认配方
+
+| 项目 | DSRL-NA | RFS-PPO |
+| --- | --- | --- |
+| 调制 | `u=tanh(z)`，flow 噪声 `w=1.5*u` | 联合对角 Gaussian `[w,u_r]`，无 tanh |
+| 网络 | 3×2048，Tanh + LayerNorm | actor/value 独立 `[256,128,64]`，ReLU |
+| 学习率 | Adam `3e-4` | actor `3e-4`，value `1e-3` |
+| 每轮更新 | 动作 Q/actor 20 次，噪声 Q 10 次 | rollout 2048块，10 epochs，batch 1024 |
+| 其他配置 | batch 256，tau 0.005，replay 20,000块 | GAE 0.95，PPO clip 0.2，value 系数0.5，entropy 系数0，梯度范数1 |
+| 初始化 | 标准高斯 warmup 24,000控制步 | 均值输出层零初始化，逐维可学习 `log_std=0` |
+| 选模间隔 | `eval_interval_chunks=1000`，回合边界触发 | `eval_interval_updates=5`，每5次 PPO 更新 |
+| 训练/总墙钟预算 | 7 / 8小时 | 23 / 24小时 |
+
+两者默认 seed=42、gamma=0.99、`total_steps=200000`、`decode_batch=64`；完整配置见 `configs/`。RFS 的网络、学习率、batch、GAE、clip、价值系数及梯度裁剪沿用论文报告值；rollout 长度、epochs、零熵系数、残差尺度、初始化与固定学习率是本地选择。
+
+DSRL 的 log-prob 在 tanh 后的 `u` 空间计算，含变换修正，target entropy=0。噪声 Q 接收 `u`；BC、warmup 和蒸馏使用标准高斯 `w`，蒸馏输入 `w/1.5` 不裁剪。动作 Q 的 TD target 包含噪声策略熵项，两个噪声 Q 分别蒸馏对应的当前动作 Q；actor 只通过噪声 Q 反传，不通过 flow。动作 Q/replay 统一使用物理限位裁剪后再归一化的动作。
+
+RFS 在归一化动作空间合成 `a_norm = FM_norm(context,w) + 0.1*u_r`，再反归一化并按机器人关节限位裁剪；`0.1` 不是弧度，示教区间 `[-1,1]` 也不是硬限位。PPO 的 log-prob、ratio 始终在原始联合采样 `[w,u_r]` 上沿全部维度求和，不对物理动作计算概率。使用整轮 advantage 归一化、clipped surrogate 和价值 MSE；flow 只参与采集，无梯度，value 不裁剪。
+
+完整 flow 噪声为 `[B,H,19]`，通常 H=16；从 `n_obs_steps-1` 开始执行 K=8 个动作，具体窗口和控制周期沿用 BC 配置，Euler 时间方向为0→1。两算法共享如下时间尺度：
+
+- `total_steps`、`warmup_steps` 和日志 `steps` 是实际执行的控制步；`rollout_steps`、日志 `chunks`、gamma 和 GAE 的一步是一个动作块。
+- 每控制步奖励为 `float(info['success'])`，采用成功保持判定；块内奖励求和，每块折扣一次，不用 `gamma**K`。
+- 成功/失败不 bootstrap；纯超时用重置前观测 bootstrap。RFS 在成功、失败和超时处均切断跨回合 GAE。块内终止立即停止执行。
+- 达到控制步上限时，RFS 可更新不足长度的 rollout；训练时间耗尽则丢弃未更新样本并记入 `discarded_chunks`。预算在动作块、更新等操作边界检查，单次操作可能略超时。
+
+## 训练、恢复与评估
+
+以下 `PATH_TO_BC.pt` 需要替换为真实预训练权重；正式性能实验尚未执行。
 
 ```bash
-python -m dexmani_rl.train --checkpoint PATH_TO_BC.pt --config configs/dsrl.yaml --output runs/task_seed42
-python -m dexmani_rl.train --resume runs/task_seed42/resume.pt --output runs/task_seed42_resume
-python -m dexmani_rl.evaluate --dsrl-checkpoint runs/task_seed42_resume/best.pt --output runs/comparison.json
+python -m dexmani_rl.train_dsrl --checkpoint PATH_TO_BC.pt --config configs/dsrl.yaml --output runs/dsrl_task_seed42
+python -m dexmani_rl.train_rfs --checkpoint PATH_TO_BC.pt --config configs/rfs.yaml --output runs/rfs_task_seed42
+python -m dexmani_rl.train_rfs --resume runs/rfs_task_seed42/resume.pt --output runs/rfs_task_seed42_resume
+python -m dexmani_rl.evaluate --rl-checkpoint runs/rfs_task_seed42_resume/best.pt --episodes 100 --output runs/rfs_comparison.json
 python -m dexmani_rl.evaluate --checkpoint PATH_TO_BC.pt --output runs/baseline.json
 ```
 
-所有入口支持 `--device`。新训练可指定 `--config` 和 `--weights raw/ema`；恢复直接读取 `resume.pt` 中的基础权重路径、权重选择和训练配置。DSRL 评估同样从导出的文件读取基础策略信息，单独评估 BC 才使用 `--checkpoint` 和可选的 `--weights`。保留记录的基础权重文件；输出目录必须不存在。
+DSRL 恢复同样使用 `train_dsrl --resume`；两种 RL 评估统一使用 `--rl-checkpoint`。所有入口支持 `--device`；新训练和独立 BC 评估可用 `--weights raw/ema`。恢复使用保存的配置、基础权重路径和权重选择，需保留该 BC 文件；输出目录/文件必须尚不存在。
 
-训练输出的 `evaluation.json` 用 `dsrl_checkpoint` 记录实际评估的文件名，相对于当前输出目录；已有 RL 更新但未产生选模 checkpoint 时使用 `last.pt`。若预算在首次 RL 更新前耗尽，只评估基础策略，该字段为 `null`。恢复从新回合开始，不恢复物理场景中途状态。只加载自己信任的训练文件。
+评估池排序后以1024打乱，前100个作为测试，后20个选模，训练排除整个评估池。三组种子写入 RL checkpoint，恢复和独立 RL 评估沿用保存结果。BC 独立评估从当前池划分；`--episodes` 默认完整测试池，显式值须为正且不超过池长度。
 
-默认单环境，3×2048 MLP，Tanh＋LayerNorm，batch 256，Adam 3e-4，gamma 0.99，tau 0.005，噪声幅度 1.5。每动作块更新动作 Q/actor 20 次、噪声 Q 10 次，前向分批 64。先以标准高斯噪声采集 24,000 控制步，总上限 200,000 步。总预算 8 GPU 小时（单 GPU 进程墙钟），训练及选模最多 7 小时，剩余用于测试；恢复累计已用时间。每个动作块开始前检查预算，reset 若已耗尽训练时间则停止采集和更新；单次动作块、更新、环境创建和保存可能小幅超过截止点。
+配对评估对每个 seed 重设环境与策略 RNG，BC 和调制策略采用相同窗口、积分步数与采样预算，无 best-of-N。每环境最多25次回合尝试，双策略每批12个 seed；只提交完整配对，截止时舍弃未完成的整对。`comparison` 报告成功数、成功率差和 `paired_conservative_95_ci`：两个不一致结果的97.5% Clopper–Pearson 区间经 Bonferroni 合成至少95%覆盖区间；它不代表跨训练 seed 的稳定性。
 
-每 25 次回合尝试重建环境并保存 `resume.pt`，其中包含完整 DSRL 网络、优化器、replay、Torch 与环境种子 RNG、选模进度及累计预算。`last.pt` 和 `best.pt` 只保存用于推理的 actor 与配置；历史最佳 actor 在恢复后的最终评估前也会导出。最终评估使用独立的最佳 actor，恢复文件始终保存最近的训练状态。
+`best.pt` 按完整选模集成功率保存 actor 与重建元数据；`last.pt` 保存最新 actor。`resume.pt` 保存最新模型、优化器、RNG、计数、选模进度、历史最佳 actor 和累计墙钟，DSRL 另保存 replay。DSRL 每25次回合尝试保存恢复点，RFS 每次 PPO 更新后保存；恢复从新回合开始，不恢复物理场景或旧 RFS rollout。最终评估使用独立的最佳 actor，保留最新训练状态；已有更新但无最佳模型时评估 `last.pt`，首次更新前预算耗尽则仅评估 BC。
 
-选模、训练结束评估和独立评估共用同一 rollout。评估按 seed 依次运行所需策略，每个环境最多执行 25 个回合；BC/DSRL 配对时每批 12 个 seed。每个回合重设环境与噪声 RNG，只有该 seed 的所有策略都完成才记录结果，预算截止时舍弃未完成的整对。统计要求两组 seed 按相同顺序完整对齐，缺失或错配会显式报错。
+`config.json` 记录 RL/BC 配置与权重来源；RL checkpoint 用 `algorithm='dsrl'|'rfs'` 标识方法，保存 RL 配置、基础权重路径与选择；BC 配置从基础 checkpoint 读取。`metrics.jsonl` 记录训练及 reset 拒绝，`evaluation.json` 统一输出 `algorithm`、`rl_checkpoint`、`baseline`、`steered`、`comparison`，成功计数字段为 `steered_successes`。训练输出的 `rl_checkpoint` 相对当前输出目录，独立评估为绝对路径；独立 BC 的 `algorithm='bc'`、`rl_checkpoint=null`、`steered=[]`。
 
-`config.json` 记录训练配置、基础权重路径与 EMA/raw 选择、策略配置、PyTorch 版本和评估种子。`metrics.jsonl` 记录每块损失和被环境拒绝的 reset；`evaluation.json` 保存所用 checkpoint、配对回合和统计。源码来源版本见上文。
-
-## 研究语义
-
-- 完整噪声窗口为 `[B,H,19]`，默认 H=16；从索引 `n_obs_steps-1` 开始执行 K=8 个动作。时间积分为均匀 Euler，0→1。BC 配置中的训练期时间采样和 FPS 随机化参数不进入冻结推理。
-- 19 维绝对关节目标，弧度制，环境关节限位裁剪后再按 checkpoint normalizer 进入动作 Q。基线、replay、TD target 和蒸馏使用同一映射。
-- actor 产生 `u=tanh(z)`，向 flow 输入 `w=b*u`；噪声 Q 接收 u。标准高斯 w 用于基线、warmup 和蒸馏，蒸馏输入为 w/b，不裁剪。log-prob 在 u 空间计算，target entropy=0。
-- 动作 Q 的 target 含下一状态的噪声策略熵项；逐个 critic 蒸馏当前动作 Q；actor 只通过噪声 Q 反传，不通过 flow。
-- 每个控制步奖励为 `float(info['success'])`，使用成功保持判定，不使用环境进度奖励、不加 reward offset。块内奖励求和，每块折扣一次。真实成功/失败不 bootstrap；纯超时保留 bootstrap，并使用超时前观测。块内终止立即停止，仍保存原计划完整动作块。
-- 每帧场景 token 均值与按 checkpoint 配置处理的关节历史作为 RL 状态；`joint_state: identity` 直接保留关节输入。完整冻结 token 供 flow 解码。replay 默认 CPU float32，20,000 个块，默认模型约需 8 GB RAM。该视觉特征设计、单环境、窗口长度和环境终止处理是本任务适配，与官方 Robomimic 配方存在差异。
-- 训练 seed=42；评估池以 1024 打乱，前100个作测试，后20个作选模；训练排除全部池内种子。选模间隔1000动作块，在回合边界触发，首次 RL 更新前不选模或评估 actor。初始化阶段使用原始高斯噪声策略作为基线，与[社区 DSRL-NA 实现](https://github.com/arayabrain/dsrl_pi0_na/blob/afcb58f2bd95a2e3771db359b8f98eb8f4f9ebee/examples/train_utils_aloha_sim_na.py#L287)一致。最终使用同种子、同窗口、同采样步数的随机策略配对评估，无 best-of-N；预算不足时仅报告实际完成的配对数。
-- 统计包含成功次数、成功率差与 `paired_conservative_95_ci`。配对差值为“仅 DSRL 成功”的概率减去“仅 BC 成功”的概率：对两者分别调用 [SciPy Clopper–Pearson 精确区间](https://docs.scipy.org/doc/scipy-1.15.3/reference/generated/scipy.stats._result_classes.BinomTestResult.proportion_ci.html)，各取97.5%置信水平，再用 Bonferroni 合成至少95%覆盖率的保守区间。单对样本或所有差值相同也保留非零区间；这些区间只反映评估回合的不确定性，单训练 seed 不能说明跨训练种子的稳定性。稀疏奖励下若基础策略没有成功探索，训练可能无法改善。
-
-## 已执行验证
+## 验证
 
 ```bash
-python -m pytest -q
-python -m mypy --ignore-missing-imports --follow-imports=silent dexmani_rl
-PYTHONPATH=. python tests/validate_integration.py --output runs/alignment_integration_01 --reference-root ../dexmani_policy
-python -m dexmani_rl.train --checkpoint runs/alignment_integration_01/fixture.pt --config runs/alignment_integration_01/smoke.yaml --output runs/alignment_train_smoke_01
-python -m dexmani_rl.train --resume runs/architecture_train_smoke_01/resume.pt --output runs/alignment_resume_smoke_01
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -q -p no:cacheprovider
+python -m mypy --no-incremental --cache-dir=/dev/null --ignore-missing-imports --follow-imports=silent dexmani_rl
+PYTHONPATH=. python tests/validate_integration.py --algorithm dsrl --output runs/chain_dsrl_integration_02 --reference-root ../dexmani_policy
+PYTHONPATH=. python tests/validate_integration.py --algorithm rfs --output runs/chain_rfs_integration_02 --reference-root ../dexmani_policy
 ```
 
-现有输出目录不能重复使用。GPU 检查在工具审批允许的沙箱外执行；沙箱内 CUDA 不可用。
+当前验收：72 项 CPU 测试通过，mypy 检查19个源码文件通过；wheel 构建及包内三个 CLI 模块导入通过。结构清理前后，固定输入与 RNG 下的两算法采样、loss、更新后模型、优化器和 RNG 逐项一致。
 
-35 项 CPU 测试、16 个源码文件的 mypy 检查及 wheel 构建均通过。开发检查依赖由 `pyproject.toml` 的 `test` extra 声明。
-
-CPU 测试覆盖 SAC log-prob 及梯度、非有限梯度中止、终止/超时 TD mask、网络更新、replay 恢复、初始历史补齐与块内终止观测、RGB/点云张量化、标定投影与 checkpoint 图像配置约束、关节 identity/limits 归一化和配对区间。评估测试检查环境复用、逐 seed 的噪声、截止时整对舍弃、配对错位报错及资源关闭。入口回归执行真实 DSRL 更新和保存加载，并验证 reset 耗尽预算、warmup、选模间隔恢复、最佳 actor 导出、独立评估及最近训练状态的保留。
-
-GPU 集成检查采用随机初始化的测试权重（小 DiTX、默认 DINO），与原仓库逐项对比观测编码与固定噪声输出，检查非零速度场下的积分、真实仿真交互、全部 RL 更新、基础参数冻结与保存加载。标准和 factorized DiTX 的权重加载与有/无 KV 缓存输出另经 CPU 对照。三种视觉骨干的 freeze/full/LoRA 共9种配置，其权重加载、图像变换与 patch tokens 均与清理前逐元素一致。恢复检查使用已有的当前格式产物，核对模型、四个优化器、replay 和 RNG。交付前已检查源码差异、语法和空白。
-
-**这些测试权重不是 BC checkpoint。** 短程入口仅执行8个控制步的训练；随机策略评估结果不构成算法性能复现。真实预训练 checkpoint 尚未提供，单任务成功率提升尚未验证。
+GPU 集成脚本生成随机权重 `fixture.pt`、短程配置 `smoke.yaml` 和 `validation.json`；DSRL 完成4次更新，RFS 完成2次更新，两者均在中途保存模型、优化器及 RNG 后重新加载并继续更新，冻结权重不变；非恒等 normalizer、非零时间与观测调制下的推理与原仓库对照通过。正式训练入口输出位于 `runs/chain_dsrl_train_01/`、`runs/chain_rfs_train_01/`；统一评估入口各完成2个 seed 的配对评估，输出为 `runs/chain_dsrl_eval_01.json`、`runs/chain_rfs_eval_01.json`。这些随机权重产物仅验证链路，不用于成功率或复现性能结论。

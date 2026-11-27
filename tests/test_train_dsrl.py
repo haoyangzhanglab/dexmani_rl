@@ -5,14 +5,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 from omegaconf import OmegaConf
-from dexmani_rl import train, evaluate as evaluation
+from dexmani_rl import train_dsrl as train, evaluate as evaluation
 
 
 @pytest.mark.parametrize('stop', ['complete', 'warmup', 'reset'])
 def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, stop):
     cfg = OmegaConf.load('configs/dsrl.yaml')
     cfg.update(dict(width=8, depth=1, batch_size=2, utd=1, noise_updates=1,
-                    replay_capacity=4, warmup_steps=3, total_steps=4, eval_interval=2,
+                    replay_capacity=4, warmup_steps=3, total_steps=4, eval_interval_chunks=2,
                     train_hours=1, max_hours=2))
     if stop == 'reset':
         cfg.warmup_steps = 0
@@ -60,20 +60,28 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
                 evaluated.append({k: v.clone() for k, v in actor.state_dict().items()})
         return {name: [dict(seed=seed, success=False) for seed in seeds] for name in policies}
 
+    seed_calls = []
+
+    def split_seeds(task):
+        seed_calls.append(task)
+        assert len(seed_calls) == 1, 'Resume must preserve the saved seed partition'
+        return [10], [11], {10, 11}
+
     monkeypatch.setattr(train, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
     monkeypatch.setattr(train.DSRL, 'update', update)
     for module in (train, evaluation):
         monkeypatch.setattr(module, 'load_policy', lambda *args: (policy, policy_cfg, 'raw'))
         monkeypatch.setattr(module, 'FrozenPolicy', lambda *args: base)
         monkeypatch.setattr(module, 'make_env', make_env)
-        monkeypatch.setattr(module, 'seed_split', lambda task: ([10], [11], {10, 11}))
+        monkeypatch.setattr(module, 'seed_split', split_seeds)
         monkeypatch.setattr(module, 'evaluate', evaluate)
+    monkeypatch.setattr(evaluation, 'policy_dimensions', lambda policy: (base.state_dim, base.noise_dim, base.action_dim))
     monkeypatch.setitem(sys.modules, 'dexmani_sim', SimpleNamespace(EpisodeRejected=RuntimeError))
     previous = None
     for name in ('first', 'resumed'):
         clock[0] = 0.
         output = tmp_path / name
-        argv = ['train', '--output', str(output), '--device', 'cpu']
+        argv = ['train_dsrl', '--output', str(output), '--device', 'cpu']
         if previous is None:
             argv += ['--config', str(config), '--checkpoint', str(checkpoint)]
         else:
@@ -83,11 +91,11 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
         result = json.loads((output / 'evaluation.json').read_text())
         if stop != 'complete':
             assert not evaluated and not (output / 'best.pt').exists()
-            assert result['dsrl_checkpoint'] is None and result['dsrl'] == []
+            assert result['rl_checkpoint'] is None and result['steered'] == []
             assert result['comparison']['episodes'] == 0
         else:
-            assert result['dsrl_checkpoint'] == 'best.pt'
-            best = torch.load(output / result['dsrl_checkpoint'], weights_only=False)['actor']
+            assert result['rl_checkpoint'] == 'best.pt'
+            best = torch.load(output / result['rl_checkpoint'], weights_only=False)['actor']
             last = torch.load(output / 'last.pt', weights_only=False)['actor']
             for key in best:
                 torch.testing.assert_close(best[key], evaluated[-1][key], atol=0, rtol=0)
@@ -99,7 +107,7 @@ def test_training_and_resume_export_the_evaluated_model(tmp_path, monkeypatch, s
         previous = output
     if stop == 'complete':
         comparison = tmp_path / 'comparison.json'
-        monkeypatch.setattr(sys, 'argv', ['evaluate', '--dsrl-checkpoint', str(output / 'best.pt'),
+        monkeypatch.setattr(sys, 'argv', ['evaluate', '--rl-checkpoint', str(output / 'best.pt'),
                                          '--device', 'cpu', '--output', str(comparison)])
         evaluation.main()
         for key in best:

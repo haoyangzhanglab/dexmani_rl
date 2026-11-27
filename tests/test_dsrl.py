@@ -69,5 +69,13 @@ def test_updates_and_restore():
         torch.testing.assert_close(other.data[key], replay.data[key])
     clone = DSRL(Base(), cfg)
     clone.load_state_dict(model.state_dict())
-    for a, b in zip(model.parameters(), clone.parameters()):
-        torch.testing.assert_close(a, b)
+    saved_optimizers = copy.deepcopy({name: optimizer.state_dict() for name, optimizer in model.optimizers.items()})
+    for name, optimizer in clone.optimizers.items():
+        optimizer.load_state_dict(saved_optimizers[name])
+    rng = torch.get_rng_state()
+    expected = model.update(replay)
+    torch.set_rng_state(rng)
+    actual = clone.update(other)
+    assert actual == pytest.approx(expected)
+    for name, value in model.state_dict().items():
+        torch.testing.assert_close(value, clone.state_dict()[name], rtol=0, atol=0)

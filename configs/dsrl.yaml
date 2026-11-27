@@ -12,6 +12,6 @@ replay_capacity: 20000
 decode_batch: 64
 warmup_steps: 24000
 total_steps: 200000
-eval_interval: 1000
+eval_interval_chunks: 1000
 max_hours: 8
 train_hours: 7

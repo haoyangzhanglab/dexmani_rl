@@ -18,7 +18,6 @@ class StateEncoder(nn.Module):
         hidden_dims: Sequence[int] = (64,),
     ):
         super().__init__()
-        self.out_dim = out_dim
         layers: list[nn.Module] = []
         input_dim = state_dim
         for hidden_dim in hidden_dims:
