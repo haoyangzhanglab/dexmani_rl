@@ -1,0 +1,322 @@
+"""DiTX, continuous-time conditioning and arm/hand action tokens."""
+from __future__ import annotations
+
+import math
+import torch
+from torch import nn
+from torch.nn import functional as F
+from timm.layers import GELUTanh, Mlp, RmsNorm
+
+
+WEIGHT_INIT_STD = 0.02
+
+
+def add_temporal_embedding(tokens, frame_embedding):
+    """Frame-major observation tokens share one temporal embedding per frame."""
+    if tokens.shape[1] == 0:
+        raise ValueError("context must contain observation tokens")
+    tokens = tokens.unflatten(1, (frame_embedding.shape[1], -1))
+    return (tokens + frame_embedding.unsqueeze(2)).flatten(1, 2)
+
+
+def initialize_linear(module):
+    if isinstance(module, nn.Linear):
+        nn.init.xavier_uniform_(module.weight)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+
+def modulate(x, shift, scale):
+    return x * (1 + scale) + shift
+
+
+class FlowTimestepEmbedding(nn.Module):
+    """Continuous sin/cos features with OpenPI's 0.004–4.0 periods."""
+
+    def __init__(self, dim: int):
+        super().__init__()
+        if dim <= 0 or dim % 2:
+            raise ValueError("flow embedding dimension must be positive and even")
+        self.half_dim = dim // 2
+        self.register_buffer("frequencies", self._frequencies(), persistent=False)
+
+    def _frequencies(self, device=None):
+        fraction = torch.linspace(0, 1, self.half_dim, device=device, dtype=torch.float32)
+        period = 0.004 * (4.0 / 0.004) ** fraction
+        return 2 * math.pi / period
+
+    def _apply(self, fn, recurse=True):
+        super()._apply(fn, recurse)
+        # Rebuild after dtype conversion: casting rounded BF16 frequencies back
+        # to FP32 would retain phase errors at the shortest periods.
+        self.frequencies = self._frequencies(self.frequencies.device)
+        return self
+
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
+        angles = timestep.float()[:, None] * self.frequencies[None, :]
+        return torch.cat((angles.sin(), angles.cos()), dim=-1)
+
+
+class TimestepMLP(nn.Module):
+    def __init__(self, pos_emb_dim: int, output_dim: int):
+        super().__init__()
+        hidden_dim = pos_emb_dim * 4
+        self.net = nn.Sequential(
+            FlowTimestepEmbedding(pos_emb_dim),
+            nn.Linear(pos_emb_dim, hidden_dim),
+            nn.Mish(),
+            nn.Linear(hidden_dim, output_dim),
+        )
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        features = self.net[0](t).to(self.net[1].weight.dtype)
+        return self.net[3](self.net[2](self.net[1](features)))
+
+
+class CrossAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_norm=False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.q_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = nn.LayerNorm(self.head_dim) if qk_norm else nn.Identity()
+        self.proj = nn.Linear(dim, dim)
+
+    def prepare_kv(self, context):
+        batch, length, _ = context.shape
+        kv = (
+            self.kv(context)
+            .reshape(batch, length, 2, self.num_heads, self.head_dim)
+            .permute(2, 0, 3, 1, 4)
+        )
+        k, v = kv.unbind(0)
+        return self.k_norm(k), v
+
+    def forward(self, x, context, *, context_kv=None):
+        batch, length, channels = x.shape
+        q = self.q(x).reshape(batch, length, self.num_heads, self.head_dim).transpose(1, 2)
+        k, v = self.prepare_kv(context) if context_kv is None else context_kv
+        x = F.scaled_dot_product_attention(self.q_norm(q), k, v)
+        return self.proj(x.transpose(1, 2).reshape(batch, length, channels))
+
+
+class AdaLNModulation(nn.Module):
+    def __init__(self, hidden_dim: int, n_layers: int, num_modulations: int = 9):
+        super().__init__()
+        self.projection = nn.Linear(hidden_dim, n_layers * num_modulations * hidden_dim)
+        self.layer_shape = (n_layers, num_modulations, hidden_dim)
+
+    def forward(self, condition: torch.Tensor) -> torch.Tensor:
+        return self.projection(F.silu(condition)).unflatten(-1, self.layer_shape)
+
+
+class DiTXBlock(nn.Module):
+    def __init__(
+        self,
+        hidden_size,
+        num_heads,
+        mlp_ratio=4.0,
+        p_drop_attn=0.0,
+        qkv_bias=False,
+        qk_norm=True,
+    ):
+        super().__init__()
+
+        # ManiFlow self-attention keeps biased QKV; QK options apply only to cross-attention.
+        self.self_attn = nn.MultiheadAttention(
+            hidden_size,
+            num_heads,
+            batch_first=True,
+            dropout=p_drop_attn,
+        )
+
+        self.cross_attn = CrossAttention(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+        )
+
+        self.mlp = Mlp(
+            in_features=hidden_size,
+            hidden_features=int(hidden_size * mlp_ratio),
+            act_layer=GELUTanh,
+            drop=0.0,
+        )
+
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm3 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+
+    def prepare_context_kv(self, context):
+        return self.cross_attn.prepare_kv(context)
+
+    def forward(self, x, modulation, context_c, *, context_kv=None):
+        (
+            shift_msa,
+            scale_msa,
+            gate_msa,
+            shift_cross,
+            scale_cross,
+            gate_cross,
+            shift_mlp,
+            scale_mlp,
+            gate_mlp,
+        ) = modulation.unsqueeze(1).unbind(dim=2)
+
+        normed_x = modulate(self.norm1(x), shift_msa, scale_msa)
+        self_attn_output = self.self_attn(
+            normed_x, normed_x, normed_x, need_weights=False,
+        )[0]
+        x = x + gate_msa * self_attn_output
+
+        normed_x_cross = modulate(self.norm2(x), shift_cross, scale_cross)
+        cross_attn_output = self.cross_attn(normed_x_cross, context_c, context_kv=context_kv)
+        x = x + gate_cross * cross_attn_output
+
+        normed_x_mlp = modulate(self.norm3(x), shift_mlp, scale_mlp)
+        mlp_output = self.mlp(normed_x_mlp)
+        x = x + gate_mlp * mlp_output
+
+        return x
+
+
+class DiTXOutput(nn.Module):
+    def __init__(self, hidden_size, output_dim):
+        super().__init__()
+
+        self.norm_final = RmsNorm(hidden_size, eps=1e-6)
+
+        self.ffn_final = Mlp(
+            in_features=hidden_size,
+            hidden_features=hidden_size,
+            out_features=output_dim,
+            act_layer=GELUTanh,
+            drop=0,
+        )
+
+    def forward(self, x):
+        return self.ffn_final(self.norm_final(x))
+
+
+class DiTX(nn.Module):
+    def __init__(
+        self,
+        horizon: int,
+        action_dim: int,
+        n_obs_steps: int,
+        obs_token_dim: int,
+        timestep_embed_dim: int = 128,
+        n_layers: int = 8,
+        hidden_dim: int = 768,
+        n_head: int = 8,
+        mlp_ratio: float = 4.0,
+        p_drop_attn: float = 0.1,
+        qkv_bias: bool = False,
+        qk_norm: bool = True,
+        action_io: nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+
+        self.action_io = action_io
+        if self.action_io is None:
+            self.input_embedder = nn.Linear(action_dim, hidden_dim)
+            self.input_pos_embed = nn.Parameter(torch.zeros(1, horizon, hidden_dim))
+        self.context_embedder = nn.Linear(obs_token_dim, hidden_dim)
+        self.context_frame_pos_embed = nn.Parameter(torch.zeros(1, n_obs_steps, hidden_dim))
+        self.timestep_embedder = TimestepMLP(timestep_embed_dim, hidden_dim)
+        self.adaln_modulation = AdaLNModulation(hidden_dim, n_layers)
+        self.ditx_blocks = nn.ModuleList(
+            DiTXBlock(
+                hidden_size=hidden_dim,
+                num_heads=n_head,
+                mlp_ratio=mlp_ratio,
+                p_drop_attn=p_drop_attn,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+            )
+            for _ in range(n_layers)
+        )
+        if self.action_io is None:
+            self.final_layer = DiTXOutput(hidden_dim, action_dim)
+        self.initialize_weights()
+
+    def initialize_weights(self) -> None:
+        # Action I/O owns its initialization, including the zero velocity head.
+        for module in self.children():
+            if module is not self.action_io:
+                module.apply(initialize_linear)
+        for block in self.ditx_blocks:
+            nn.init.xavier_uniform_(block.self_attn.in_proj_weight)
+            if block.self_attn.in_proj_bias is not None:
+                nn.init.zeros_(block.self_attn.in_proj_bias)
+        nn.init.zeros_(self.adaln_modulation.projection.weight)
+
+        if self.action_io is None:
+            nn.init.normal_(self.input_embedder.weight, std=WEIGHT_INIT_STD)
+            nn.init.normal_(self.input_pos_embed, std=WEIGHT_INIT_STD)
+        nn.init.normal_(self.context_embedder.weight, std=WEIGHT_INIT_STD)
+        nn.init.zeros_(self.context_frame_pos_embed)
+        for layer in self.timestep_embedder.net:
+            if isinstance(layer, nn.Linear):
+                nn.init.normal_(layer.weight, std=WEIGHT_INIT_STD)
+        if self.action_io is None:
+            nn.init.zeros_(self.final_layer.ffn_final.fc2.weight)
+
+    def embed_context(self, context):
+        tokens = self.context_embedder(context)
+        return add_temporal_embedding(tokens, self.context_frame_pos_embed.to(tokens.dtype))
+
+    def prepare_context_kv(self, context):
+        memory = self.embed_context(context)
+        return tuple(block.prepare_context_kv(memory) for block in self.ditx_blocks)
+
+    def forward(
+        self, x: torch.Tensor, timestep: torch.Tensor, context: torch.Tensor, *, context_kv=None,
+    ) -> torch.Tensor:
+        if context.shape[0] != x.shape[0]:
+            raise ValueError("actions and context must have the same batch size")
+        memory = self.embed_context(context) if context_kv is None else None
+        modulations = self.adaln_modulation(self.timestep_embedder(timestep))
+
+        if self.action_io is None:
+            x = self.input_embedder(x)
+            x = x + self.input_pos_embed[:, :x.shape[1]].to(dtype=x.dtype)
+        else:
+            x = self.action_io.encode(x)
+        for index, (block, modulation) in enumerate(zip(self.ditx_blocks, modulations.unbind(1))):
+            x = block(
+                x, modulation, memory,
+                context_kv=None if context_kv is None else context_kv[index],
+            )
+        if self.action_io is None:
+            return self.final_layer(x)
+        return self.action_io.decode_velocity(x)
+
+
+class FactorizedActionIO(nn.Module):
+    def __init__(self, horizon: int, hidden_dim: int) -> None:
+        super().__init__()
+        self.arm_embedder = nn.Linear(7, hidden_dim)
+        self.hand_embedder = nn.Linear(12, hidden_dim)
+        self.time_pos_embed = nn.Parameter(torch.empty(1, horizon, hidden_dim))
+        self.arm_head = DiTXOutput(hidden_dim, 7)
+        self.hand_head = DiTXOutput(hidden_dim, 12)
+        self.apply(initialize_linear)
+        nn.init.normal_(self.arm_embedder.weight, std=WEIGHT_INIT_STD)
+        nn.init.normal_(self.hand_embedder.weight, std=WEIGHT_INIT_STD)
+        nn.init.normal_(self.time_pos_embed, std=WEIGHT_INIT_STD)
+        nn.init.zeros_(self.arm_head.ffn_final.fc2.weight)
+        nn.init.zeros_(self.hand_head.ffn_final.fc2.weight)
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        arm, hand = x.split((7, 12), dim=-1)
+        arm, hand = self.arm_embedder(arm), self.hand_embedder(hand)
+        position = self.time_pos_embed[:, :x.shape[1]].to(arm.dtype)
+        return torch.cat((arm + position, hand + position), dim=1)
+
+    def decode_velocity(self, tokens: torch.Tensor) -> torch.Tensor:
+        arm, hand = tokens.chunk(2, dim=1)
+        return torch.cat((self.arm_head(arm), self.hand_head(hand)), dim=-1)

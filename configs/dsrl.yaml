@@ -1,0 +1,17 @@
+seed: 42
+width: 2048
+depth: 3
+lr: 0.0003
+batch_size: 256
+gamma: 0.99
+tau: 0.005
+noise_magnitude: 1.5
+utd: 20
+noise_updates: 10
+replay_capacity: 20000
+decode_batch: 64
+warmup_steps: 24000
+total_steps: 200000
+eval_interval: 1000
+max_hours: 8
+train_hours: 7

@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "dexmani_rl"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.4,<2.5", "torchvision>=0.19,<0.20", "numpy>=1.26,<2", "scipy>=1.7", "omegaconf", "timm>=1.0.22,<1.1", "transformers>=4.48,<5"]
+[project.optional-dependencies]
+test = ["pytest", "mypy"]
+lora = ["peft"]
+[tool.setuptools.packages.find]
+include = ["dexmani_rl*"]
