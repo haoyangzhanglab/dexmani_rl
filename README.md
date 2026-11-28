@@ -15,16 +15,14 @@ DexMani RL 在 dexmani_sim 的 xArm7 + XHand 仿真中研究灵巧手 FlowMatch 
 
 | 位置 | 职责 |
 | --- | --- |
-| [configs/](configs/) | DSRL-NA、RFS-PPO、RoboFFT-F 和 BORA–FlowMatch 的训练配方 |
-| [dexmani_rl/](dexmani_rl/) | `train_*.py` 编排训练，对应的算法模块定义网络与更新规则。`replay.py` 存储 DSRL 转移，`bora_data.py` 读取示教并采集 BORA 在线轨迹 |
-| [dexmani_rl/policy/](dexmani_rl/policy/) | FlowMatch 模型、观测编码、动作解码与归一化 |
-| [dexmani_rl/common/](dexmani_rl/common/) | BC 加载、仿真环境、GAE、选模与 checkpoint 保存和恢复 |
+| [configs/methods/](configs/methods/) | 四种方法的默认实验配方 |
+| [dexmani_rl/methods/](dexmani_rl/methods/) | 各方法的算法、训练、评估与专属数据。DSRL 管理转移回放，BORA 管理示教与在线采集 |
+| [dexmani_rl/policies/flowmatch/](dexmani_rl/policies/flowmatch/) | FlowMatch 模型、BC 加载、RL 运行时与推理适配器 |
 | [dexmani_rl/core/](dexmani_rl/core/) | 模型无关的 ActionSpec、PolicyAdapter 和 EnvAdapter 契约 |
-| [dexmani_rl/policies/](dexmani_rl/policies/) | 具体策略后端的运行时适配器；FlowMatch 网络仍位于 `policy/` |
 | [dexmani_rl/envs/](dexmani_rl/envs/) | 环境接口适配和物理动作转换 |
-| [dexmani_rl/evaluate.py](dexmani_rl/evaluate.py) | 按 seed 配对评估并输出成功率比较 |
+| [dexmani_rl/evaluation/](dexmani_rl/evaluation/) | 配对评估统计 |
 
-架构边界、扩展规则和兼容策略见 [docs/architecture.md](docs/architecture.md)。
+架构边界、扩展规则和验证方式见 [docs/architecture.md](docs/architecture.md)。
 
 ## 安装
 
@@ -46,16 +44,16 @@ BC=/path/to/bc.pt
 ALG=rfs
 
 # 使用对应的默认配方训练
-python -m dexmani_rl.train_${ALG} --checkpoint "$BC" --output "runs/$ALG"
+python -m dexmani_rl.methods.${ALG}.train --checkpoint "$BC" --output "runs/$ALG"
 
 # 从训练快照恢复
-python -m dexmani_rl.train_${ALG} --resume "runs/$ALG/resume.pt" --output "runs/${ALG}_resumed"
+python -m dexmani_rl.methods.${ALG}.train --resume "runs/$ALG/resume.pt" --output "runs/${ALG}_resumed"
 
 # 跨方法比较统一使用 last.pt，并跑完同一组 100 个测试 seed
-python -m dexmani_rl.evaluate --rl-checkpoint "runs/$ALG/last.pt" --episodes 100 --output "runs/${ALG}_eval.json"
+python -m dexmani_rl.methods.${ALG}.evaluate --rl-checkpoint "runs/$ALG/last.pt" --episodes 100 --output "runs/${ALG}_eval.json"
 
 # 单独评估原始 BC 权重
-python -m dexmani_rl.evaluate --checkpoint "$BC" --episodes 100 --output "runs/bc_eval.json"
+python -m dexmani_rl.methods.${ALG}.evaluate --checkpoint "$BC" --episodes 100 --output "runs/bc_eval.json"
 ~~~
 
 BORA 默认读取任务的成功示教，可用 `--demonstrations` 参数指定含 episode_*.h5 的目录。

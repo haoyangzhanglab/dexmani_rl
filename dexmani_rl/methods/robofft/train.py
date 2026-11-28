@@ -2,20 +2,27 @@
 import json
 import time
 from contextlib import ExitStack, closing
+from pathlib import Path
 
 import numpy as np
 import torch
 
-from .common.base_policy import FrozenPolicy
-from .common.checkpoint import restore_rng, save
-from .common.env import make_env, training_episodes
-from .common.training import OnlineRun, training_arguments
+from dexmani_rl.envs.dexmani_sim import make_flowmatch_env, training_episodes
+from dexmani_rl.policies.flowmatch.rl_runtime import FlowMatchRLRuntime
+
+from .._shared.cli import training_inputs, training_parser
+from .._shared.flowmatch_online import FlowMatchOnlineRun
+from .._shared.torch_checkpoint import restore_rng, save
+from .algorithm import RoboFFT, RoboFFTActor
 from .evaluate import evaluate, evaluation_report
-from .robofft import RoboFFT, RoboFFTActor
+
+DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / 'configs' / 'methods' / 'robofft.yaml'
 
 
 def main():
-    args, cfg, checkpoint, weights, saved = training_arguments('robofft')
+    parser = training_parser()
+    args = parser.parse_args()
+    cfg, checkpoint, weights, saved = training_inputs(parser, args, method='robofft', default_config=DEFAULT_CONFIG)
     if (type(cfg['rollout_steps']) is not int or cfg['rollout_steps'] < 2
             or not 0 < cfg['train_hours'] <= cfg['max_hours']):
         raise ValueError('Invalid RoboFFT collection or time budget')
@@ -23,10 +30,10 @@ def main():
         raise ValueError('eval_interval must be at least 2 to leave iterations for training')
 
     output = args.output
-    run = OnlineRun('robofft', args, cfg, checkpoint, weights, saved)
+    run = FlowMatchOnlineRun('robofft', args, cfg, checkpoint, weights, saved)
     policy, policy_cfg = run.policy, run.policy_cfg
-    with make_env(policy, policy_cfg) as env:
-        base = FrozenPolicy(policy, policy_cfg, env.env.robot.qlimits)
+    with make_flowmatch_env(policy, policy_cfg) as env:
+        base = FlowMatchRLRuntime(policy, policy_cfg, env.env.robot.qlimits)
     actor = RoboFFTActor.from_policy(policy, policy_cfg, cfg)
     agent = RoboFFT(base.state_dim, actor, cfg, base.device)
     iteration, steps, chunks, updates, actor_updates, discarded_chunks = 0, 0, 0, 0, 0, 0
@@ -103,7 +110,7 @@ def main():
                         eps, t = agent.actor.draw_matching(action)
                         old_log_prob = agent.actor.log_prob(context, action, eps, t)
                         value = agent.value(state)
-                        physical, physical_clip = base.robofft_actions(action)
+                        physical, physical_clip = base.physical_execution_window(action)
                     obs, reward, terminated, truncated, info = env.step(physical[0].cpu().numpy())
                     next_context, next_state = base.encode(obs)
                     with torch.no_grad():

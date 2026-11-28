@@ -1,59 +1,23 @@
-"""Shared command-line inputs and validation bookkeeping for the training scripts."""
-import argparse
+"""Time budgets, validation and snapshots for online FlowMatch experiments."""
 import copy
 import json
 import time
-from pathlib import Path
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 
-from .base_policy import load_policy
-from .checkpoint import capture_rng, save
-from .env import seed_split
+from dexmani_rl.envs.dexmani_sim import seed_split
+from dexmani_rl.policies.flowmatch.loader import load_flowmatch_policy
 
-
-def training_arguments(algorithm):
-    parser = argparse.ArgumentParser()
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--checkpoint')
-    source.add_argument('--resume')
-    parser.add_argument('--config', type=Path)
-    parser.add_argument('--weights', choices=['ema', 'raw'])
-    parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--device', default='cuda:0')
-    if algorithm == 'bora':
-        parser.add_argument('--through', choices=['offline', 'round1', 'round2'], default='round2',
-                            help='Last stage to run before saving the training snapshot')
-        parser.add_argument('--demonstrations', type=Path, help='Directory containing episode_*.h5')
-    args = parser.parse_args()
-    if args.output.exists():
-        raise FileExistsError(args.output)
-    if args.resume:
-        if args.config or args.weights or getattr(args, 'demonstrations', None):
-            parser.error('--resume uses the saved config, weight selection and data source')
-        saved = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if (not isinstance(saved, dict) or saved.get('algorithm') != algorithm
-                or 'model' not in saved):
-            parser.error(f'--resume requires a {algorithm} training snapshot (resume.pt)')
-        return args, saved['config'], saved['base_checkpoint'], saved['weights'], saved
-
-    config_path = args.config
-    if config_path is None:
-        config_path = Path(__file__).resolve().parents[2] / 'configs' / f'{algorithm}.yaml'
-        if not config_path.is_file():
-            parser.error('Default configuration is unavailable. Pass --config with a YAML file.')
-    cfg = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
-    return args, cfg, str(Path(args.checkpoint).resolve()), args.weights, None
+from .torch_checkpoint import capture_rng, save
 
 
-class OnlineRun:
+class FlowMatchOnlineRun:
     def __init__(self, algorithm, args, cfg, checkpoint, weights, saved):
         started = time.monotonic()
         torch.manual_seed(cfg['seed'])
         self.rng = np.random.default_rng(cfg['seed'])
-        self.policy, self.policy_cfg, weights = load_policy(checkpoint, args.device, weights)
+        self.policy, self.policy_cfg, weights = load_flowmatch_policy(checkpoint, args.device, weights)
         if saved is None:
             test, validation, excluded = seed_split(self.policy_cfg['env_runner']['task_name'])
         else:

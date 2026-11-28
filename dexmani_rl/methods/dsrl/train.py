@@ -1,19 +1,26 @@
 import json
 import time
+from pathlib import Path
 
 import torch
 
-from .common.base_policy import FrozenPolicy
-from .common.checkpoint import restore_rng, save
-from .common.env import make_env
-from .common.training import OnlineRun, training_arguments
-from .dsrl import DSRL
+from dexmani_rl.envs.dexmani_sim import make_flowmatch_env
+from dexmani_rl.policies.flowmatch.rl_runtime import FlowMatchRLRuntime
+
+from .._shared.cli import training_inputs, training_parser
+from .._shared.flowmatch_online import FlowMatchOnlineRun
+from .._shared.torch_checkpoint import restore_rng, save
+from .algorithm import DSRL
 from .evaluate import evaluate, evaluate_noise_policy
 from .replay import Replay
 
+DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / 'configs' / 'methods' / 'dsrl.yaml'
+
 
 def main():
-    args, cfg, checkpoint, weights, saved = training_arguments('dsrl')
+    parser = training_parser()
+    args = parser.parse_args()
+    cfg, checkpoint, weights, saved = training_inputs(parser, args, method='dsrl', default_config=DEFAULT_CONFIG)
     counts = ('total_steps', 'replay_capacity', 'decode_batch', 'eval_interval_chunks')
     if (any(type(cfg[key]) is not int or cfg[key] <= 0 for key in counts)
             or type(cfg['warmup_steps']) is not int
@@ -21,12 +28,12 @@ def main():
             or not 0 < cfg['train_hours'] <= cfg['max_hours']):
         raise ValueError('Invalid DSRL collection or time budget')
     output = args.output
-    run = OnlineRun('dsrl', args, cfg, checkpoint, weights, saved)
+    run = FlowMatchOnlineRun('dsrl', args, cfg, checkpoint, weights, saved)
     policy, policy_cfg = run.policy, run.policy_cfg
     replay = Replay(cfg['replay_capacity'])
     steps, chunks, actor_update_chunk, last_eval_chunk = 0, 0, 0, 0
-    with make_env(policy, policy_cfg) as env:
-        base = FrozenPolicy(policy, policy_cfg, env.env.robot.qlimits, cfg['decode_batch'])
+    with make_flowmatch_env(policy, policy_cfg) as env:
+        base = FlowMatchRLRuntime(policy, policy_cfg, env.env.robot.qlimits, cfg['decode_batch'])
         agent = DSRL(base, cfg)
     if saved is not None:
         agent.load_state_dict(saved['model'])
@@ -55,7 +62,7 @@ def main():
     from dexmani_sim import EpisodeRejected
     with (output / 'metrics.jsonl').open('a', buffering=1) as log:
         while steps < cfg['total_steps'] and time.monotonic() < training_deadline:
-            with make_env(policy, policy_cfg) as env:
+            with make_flowmatch_env(policy, policy_cfg) as env:
                 for _ in range(25):
                     if steps >= cfg['total_steps'] or time.monotonic() >= training_deadline:
                         break

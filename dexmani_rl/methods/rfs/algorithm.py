@@ -5,7 +5,7 @@ from torch import nn
 from torch.distributions import Normal
 from torch.nn import functional as F
 
-from .common.returns import gae
+from dexmani_rl.methods._shared.returns import gae
 
 
 def mlp(input_dim, output_dim, hidden_dims):

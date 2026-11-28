@@ -7,17 +7,27 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .bora import BORA
-from .bora_data import FrameReplay, collect_episode
-from .common.base_policy import load_policy
-from .common.checkpoint import capture_rng, restore_rng, save
-from .common.env import make_env, seed_split
-from .common.training import training_arguments
-from .envs.action_transform import JointActionTransform
+from dexmani_rl.envs.action_transform import JointActionTransform
+from dexmani_rl.envs.dexmani_sim import make_flowmatch_env, seed_split
+from dexmani_rl.policies.flowmatch.loader import load_flowmatch_policy
+
+from .._shared.cli import training_inputs, training_parser
+from .._shared.torch_checkpoint import capture_rng, restore_rng, save
+from .algorithm import BORA
+from .data import FrameReplay, collect_episode
+
+DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / 'configs' / 'methods' / 'bora.yaml'
 
 
 def main(correction=None, confirm_recovery=None):
-    args, cfg, checkpoint, weights, saved = training_arguments('bora')
+    parser = training_parser()
+    parser.add_argument('--through', choices=['offline', 'round1', 'round2'], default='round2',
+                        help='Last stage to run before saving the training snapshot')
+    parser.add_argument('--demonstrations', type=Path, help='Directory containing episode_*.h5')
+    args = parser.parse_args()
+    if args.resume and args.demonstrations:
+        parser.error('--resume uses the saved demonstration data')
+    cfg, checkpoint, weights, saved = training_inputs(parser, args, method='bora', default_config=DEFAULT_CONFIG)
     from dexmani_sim import DATA_DIR, EpisodeRejected
 
     through = ('offline', 'round1', 'round2').index(args.through)
@@ -30,7 +40,7 @@ def main(correction=None, confirm_recovery=None):
         raise ValueError('BORA requires a BC+PPO phase and an even mixed batch size')
     torch.manual_seed(cfg['seed'])
     rng = np.random.default_rng(cfg['seed'])
-    policy, bc_cfg, weights = load_policy(checkpoint, args.device, weights)
+    policy, bc_cfg, weights = load_flowmatch_policy(checkpoint, args.device, weights)
     device = next(policy.parameters()).device
     task = bc_cfg['env_runner']['task_name']
     if saved is None:
@@ -66,7 +76,7 @@ def main(correction=None, confirm_recovery=None):
     version = None
     if shutil.which('git'):
         version = subprocess.run(['git', 'describe', '--always', '--dirty', '--abbrev=40'],
-            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False).stdout.strip()
+            cwd=Path(__file__).resolve().parent, capture_output=True, text=True, check=False).stdout.strip()
     metadata = {'algorithm': 'bora', 'config': cfg, 'base_checkpoint': checkpoint, 'weights': weights,
                 'git_revision': version or None, 'torch': str(torch.__version__), 'test_seeds': test_seeds,
                 'excluded_seeds': sorted(excluded), 'demo_files': [str(p) for p in demo_files]}
@@ -107,7 +117,7 @@ def main(correction=None, confirm_recovery=None):
             if seed in excluded:
                 continue
             path = output / 'online' / f'episode_{episodes:03}_{seed}.h5'
-            with make_env(policy, bc_cfg) as env:
+            with make_flowmatch_env(policy, bc_cfg) as env:
                 transform = JointActionTransform(
                     policy.normalizer['action'], torch.as_tensor(env.env.robot.qlimits, device=device),
                     action_dim=policy.action_dim, execute_steps=policy.n_action_steps,

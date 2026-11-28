@@ -6,7 +6,7 @@ from ..core.contracts import StepResult
 
 
 class ChunkEnvAdapter:
-    """Adapt the existing five-tuple ChunkEnv API to the EnvAdapter contract.
+    """Adapt the existing five-tuple FlowMatchChunkEnv API to the EnvAdapter contract.
 
     The wrapped environment remains owned by its existing context manager. This
     adapter deliberately does not close borrowed environments on close().

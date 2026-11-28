@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from .common.returns import gae
+from dexmani_rl.methods._shared.returns import gae
 
 
 class RoboFFTActor(nn.Module):

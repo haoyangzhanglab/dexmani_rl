@@ -6,10 +6,10 @@ from contextlib import contextmanager
 
 import numpy as np
 
-from ..policy.preprocess import prepare_observations
+from dexmani_rl.policies.flowmatch.model.preprocess import prepare_observations
 
 
-class ChunkEnv:
+class FlowMatchChunkEnv:
     def __init__(self, env, policy, cfg):
         self.env, self.policy = env, policy
         self.history: deque[dict[str, np.ndarray]] = deque(maxlen=policy.n_obs_steps)
@@ -44,14 +44,14 @@ class ChunkEnv:
 
 
 @contextmanager
-def make_env(policy, cfg):
+def make_flowmatch_env(policy, cfg):
     from dexmani_sim import resolve_env_class
     from dexmani_sim.envs.lifecycle import open_env
     kwargs = dict(cfg['env_runner'].get('env_kwargs') or {})
     kwargs.update(render_mode='rgb_array', record_video=False,
                   observation_keys=tuple(k for k in policy.normalization_dims if k != 'action'))
     with open_env(resolve_env_class(cfg['env_runner']['task_name']), **kwargs) as env:
-        yield ChunkEnv(env, policy, cfg)
+        yield FlowMatchChunkEnv(env, policy, cfg)
 
 
 def seed_split(task):
@@ -68,7 +68,7 @@ def training_episodes(policy, cfg, rng, excluded, deadline, log):
     from dexmani_sim import EpisodeRejected
 
     while time.monotonic() < deadline:
-        with make_env(policy, cfg) as env:
+        with make_flowmatch_env(policy, cfg) as env:
             attempts = 0
             while attempts < 25 and time.monotonic() < deadline:
                 seed = int(rng.integers(2**32))

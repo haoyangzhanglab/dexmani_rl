@@ -8,7 +8,7 @@ import h5py
 import numpy as np
 import torch
 
-from .policy.preprocess import prepare_observations
+from dexmani_rl.policies.flowmatch.model.preprocess import prepare_observations
 
 
 class FrameReplay:

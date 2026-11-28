@@ -1,28 +1,35 @@
 import json
 import time
 from contextlib import closing
+from pathlib import Path
 
 import torch
 
-from .common.base_policy import FrozenPolicy
-from .common.checkpoint import restore_rng, save
-from .common.env import make_env, training_episodes
-from .common.training import OnlineRun, training_arguments
+from dexmani_rl.envs.dexmani_sim import make_flowmatch_env, training_episodes
+from dexmani_rl.policies.flowmatch.rl_runtime import FlowMatchRLRuntime
+
+from .._shared.cli import training_inputs, training_parser
+from .._shared.flowmatch_online import FlowMatchOnlineRun
+from .._shared.torch_checkpoint import restore_rng, save
+from .algorithm import RFS
 from .evaluate import evaluate, evaluate_noise_policy
-from .rfs import RFS
+
+DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / 'configs' / 'methods' / 'rfs.yaml'
 
 
 def main():
-    args, cfg, checkpoint, weights, saved = training_arguments('rfs')
+    parser = training_parser()
+    args = parser.parse_args()
+    cfg, checkpoint, weights, saved = training_inputs(parser, args, method='rfs', default_config=DEFAULT_CONFIG)
     if (any(type(cfg[k]) is not int or cfg[k] <= 0 for k in
             ('total_steps', 'rollout_steps', 'eval_interval_updates')) or
             cfg['rollout_steps'] < 2 or not 0 < cfg['train_hours'] <= cfg['max_hours']):
         raise ValueError('Invalid RFS collection or time budget')
     output = args.output
-    run = OnlineRun('rfs', args, cfg, checkpoint, weights, saved)
+    run = FlowMatchOnlineRun('rfs', args, cfg, checkpoint, weights, saved)
     policy, policy_cfg = run.policy, run.policy_cfg
-    with make_env(policy, policy_cfg) as env:
-        base = FrozenPolicy(policy, policy_cfg, env.env.robot.qlimits)
+    with make_flowmatch_env(policy, policy_cfg) as env:
+        base = FlowMatchRLRuntime(policy, policy_cfg, env.env.robot.qlimits)
         agent = RFS(base.state_dim, base.noise_dim, base.action_dim, cfg, base.device)
     steps, chunks, updates, last_eval_update, discarded_chunks = 0, 0, 0, 0, 0
     if saved is not None:
