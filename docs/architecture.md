@@ -35,7 +35,7 @@ The core package must not import a policy, algorithm, simulator, or dataset impl
 4. Add tests for output shape, action semantics, and checkpoint loading.
 5. Add a method only if the policy needs a distinct training procedure.
 
-Do not modify existing policy adapters, RL algorithms, or the shared evaluator merely to register a new model. Do not add a global registry until there is a demonstrated need for third-party runtime discovery.
+Do not modify existing policy adapters, RL algorithms, or the shared evaluator merely to register a new model. Methods construct the selected backend explicitly.
 
 ## Adding a method
 
@@ -47,11 +47,12 @@ Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and
 
 A method owns its configuration and imports. Remove its package, configuration, and entry point together. Shared code must not import method packages. A policy backend can be removed with its adapter and optional dependencies as long as no method explicitly selects it. This is enforced by lazy backend imports and dependency-direction tests/review.
 
-## Current compatibility layer
+## FlowMatch runtime
 
-- common/base_policy.py FrozenPolicy remains the public compatibility facade for DSRL and RFS. Observation encoding, FlowMatch decoding, and joint action transforms are delegated to smaller components.
-- ChunkEnv retains its existing five-tuple API for the current training scripts. ChunkEnvAdapter exposes the new StepResult contract to new code without forcing a simultaneous migration of all trainers.
-- The existing policy/ directory remains the FlowMatch model implementation during this migration. policies/ contains runtime adapters, not duplicate model definitions.
+The network lives in `policy/`. The runtime and inference adapter live in
+`policies/flowmatch/`. Training and evaluation use `FrozenPolicy` for observation
+encoding, decoding and joint limits. Training scripts consume the five values
+from `ChunkEnv.step`; `ChunkEnvAdapter` exposes them as a `StepResult`.
 
 ## Validation
 
@@ -65,7 +66,7 @@ The contract suite does not replace simulator integration tests. When compatible
 
 ## Execution and data ownership
 
-FlowMatch returns a batch of executable joint positions in radians with shape
+FlowMatchPolicyAdapter returns a batch of executable joint positions in radians with shape
 `[B, execute_steps, action_dim]`. The prediction horizon describes the full
 model sample. The decoder removes observation history before selecting the
 future window. RoboFFT keeps the full sample for matching and selects the

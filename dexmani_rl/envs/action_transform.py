@@ -5,8 +5,8 @@ from typing import Any
 import torch
 
 
-def _limits_tensor(limits: Any, *, device: torch.device, dtype: torch.dtype, action_dim: int) -> torch.Tensor:
-    value = torch.as_tensor(limits, device=device, dtype=dtype)
+def _limits_tensor(limits: Any, action_dim: int) -> torch.Tensor:
+    value = torch.as_tensor(limits, dtype=torch.float32)
     if value.shape != (action_dim, 2):
         raise ValueError(f"Expected joint limits [{action_dim}, 2], got {tuple(value.shape)}")
     if not torch.isfinite(value).all() or not (value[:, 0] <= value[:, 1]).all():
@@ -39,10 +39,7 @@ class JointActionTransform:
         self.normalizer = normalizer
         self.action_dim = action_dim
         self.execute_steps = execute_steps
-        self.limits = _limits_tensor(
-            limits, device=torch.as_tensor(limits).device, dtype=torch.float32,
-            action_dim=action_dim,
-        )
+        self.limits = _limits_tensor(limits, action_dim)
 
     def executable_coordinates(self, window: torch.Tensor, *, return_clip_fraction: bool = False):
         requested, executable = joint_targets(window, self.normalizer, self.limits)

@@ -9,48 +9,7 @@ from dexmani_rl.core.specs import ActionSegment, ActionSpec
 from dexmani_rl.envs.adapters import ChunkEnvAdapter
 from dexmani_rl.common.base_policy import FrozenPolicy, policy_dimensions
 from dexmani_rl.policies.flowmatch.adapter import FlowMatchPolicyAdapter
-
-
-class IdentityField:
-    def normalize(self, value):
-        return value
-
-    def unnormalize(self, value):
-        return value
-
-
-class FakeNormalizer:
-    fields = {"joint_state", "action"}
-
-    def __init__(self):
-        self.values = {name: IdentityField() for name in self.fields}
-
-    def __getitem__(self, name):
-        return self.values[name]
-
-
-class FakeObservationEncoder:
-    out_dim = 5
-
-
-class FakeFlowMatchPolicy(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.anchor = torch.nn.Parameter(torch.zeros(()))
-        self.n_obs_steps = 2
-        self.horizon = 4
-        self.n_action_steps = 2
-        self.action_dim = 3
-        self.normalization_dims = {"joint_state": 3}
-        self.obs_encoder = FakeObservationEncoder()
-        self.normalizer = FakeNormalizer()
-
-    def encode_observations(self, obs):
-        batch = obs["joint_state"].shape[0]
-        return torch.zeros(batch, self.n_obs_steps * 3, self.obs_encoder.out_dim)
-
-    def decode_condition(self, context, noise, inference_steps):
-        return noise
+from tests.flowmatch_fixtures import FakeFlowMatchPolicy
 
 
 class FakeLegacyEnv:
@@ -107,6 +66,23 @@ assert not {'torch', 'torchvision', 'transformers', 'timm', 'dexmani_sim'}.inter
 """
         subprocess.run([sys.executable, "-S", "-c", code], check=True)
 
+    def test_legacy_joint_helpers_without_flowmatch(self):
+        code = """
+import sys
+sys.modules['dexmani_rl.policies.flowmatch'] = None
+sys.modules['dexmani_rl.policy'] = None
+import torch
+from dexmani_rl.common.base_policy import joint_targets, executable_actions
+from tests.flowmatch_fixtures import IdentityField
+field = IdentityField()
+window = torch.tensor([[[2., -0.5]]])
+limits = torch.tensor([[-1., 1.], [-1., 1.]])
+expected = torch.tensor([[[1., -0.5]]])
+torch.testing.assert_close(joint_targets(window, field, limits), (window, expected))
+torch.testing.assert_close(executable_actions(window, field, limits), expected)
+"""
+        subprocess.run([sys.executable, "-c", code], check=True)
+
     def test_method_imports(self):
         code = """
 import sys
@@ -154,6 +130,19 @@ assert not {'dexmani_rl.policy.flowmatch', 'torchvision', 'transformers', 'timm'
     def test_flowmatch_dimensions_are_derived_from_checkpoint_shape(self):
         policy = FakeFlowMatchPolicy()
         self.assertEqual(policy_dimensions(policy), (16, 12, 6))
+
+    def test_adapter_returns_clamped_physical_window(self):
+        from dexmani_rl.policy.normalizer import FieldNormalizer
+
+        policy = FakeFlowMatchPolicy()
+        policy.normalizer.values["action"] = FieldNormalizer([2.] * 3, [100.] * 3)
+        limits = torch.tensor([[-0.1, 0.1]] * 3)
+        base = FrozenPolicy(policy, {"eval": {"inference_steps": 2}}, limits)
+        adapter = FlowMatchPolicyAdapter(base)
+        obs = {"joint_state": torch.zeros(1, 2, 3)}
+        noise = torch.tensor([[101., 99., 100.] * 4])
+        expected = torch.tensor([[[0.1, -0.1, 0.]] * 2])
+        torch.testing.assert_close(adapter.predict(obs, noise=noise).action, expected, rtol=0, atol=0)
 
     def test_frozen_policy_facade_and_generic_adapter(self):
         policy = FakeFlowMatchPolicy()

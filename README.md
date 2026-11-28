@@ -26,6 +26,16 @@ DexMani RL 在 dexmani_sim 的 xArm7 + XHand 仿真中研究灵巧手 FlowMatch 
 
 架构边界、扩展规则和兼容策略见 [docs/architecture.md](docs/architecture.md)。
 
+## 安装
+
+在 Python 3.10 的 policy 环境中，从仓库根目录执行：
+
+~~~bash
+python -m pip install -e .
+~~~
+
+仿真训练还需要安装 dexmani_sim，并准备与 BC checkpoint 匹配的任务资产和 seed 池。
+
 ## 常用命令
 
 从仓库根目录运行，使用已安装 dexmani_sim、任务资产及评估 seed 池的 policy 环境。将 BC 换成实际权重路径，ALG 可选 dsrl、rfs、robofft 或 bora。每次运行使用新的输出路径。
@@ -43,16 +53,9 @@ python -m dexmani_rl.train_${ALG} --resume "runs/$ALG/resume.pt" --output "runs/
 
 # 跨方法比较统一使用 last.pt，并跑完同一组 100 个测试 seed
 python -m dexmani_rl.evaluate --rl-checkpoint "runs/$ALG/last.pt" --episodes 100 --output "runs/${ALG}_eval.json"
+
+# 单独评估原始 BC 权重
+python -m dexmani_rl.evaluate --checkpoint "$BC" --episodes 100 --output "runs/bc_eval.json"
 ~~~
 
-单独评估 BC 时，将评估命令中的 `--rl-checkpoint` 参数换为 `--checkpoint` 参数。BORA 默认读取任务的成功示教，可用 `--demonstrations` 参数指定含 episode_*.h5 的目录。
-
-## 安装
-
-在 Python 3.10 的 policy 环境中，从仓库根目录执行：
-
-~~~bash
-python -m pip install -e .
-~~~
-
-仿真训练还需要安装 dexmani_sim，并准备与 BC checkpoint 匹配的任务资产和 seed 池。
+BORA 默认读取任务的成功示教，可用 `--demonstrations` 参数指定含 episode_*.h5 的目录。

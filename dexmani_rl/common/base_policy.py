@@ -1,14 +1,11 @@
-"""BC checkpoint loading and backwards-compatible FlowMatch RL runtime."""
+"""BC checkpoint loading and FlowMatch execution for the training and evaluation entry points."""
 
 import torch
 
 from ..envs.action_transform import JointActionTransform, executable_actions, joint_targets
-from ..policies.flowmatch.runtime import FlowMatchActionDecoder, FlowMatchObservationEncoder
 
 
 def load_policy(path, device, weights=None):
-    # Keep model-specific imports lazy: importing the common runtime must not
-    # eagerly import vision backbones or optional VLA dependencies.
     from ..policy.flowmatch import FlowMatch
     from ..policy.normalizer import normalization_feature_shapes
 
@@ -41,22 +38,22 @@ def load_policy(path, device, weights=None):
 
 
 def policy_dimensions(policy):
-    observation = FlowMatchObservationEncoder(policy)
-    return (observation.state_dim,
-            observation.noise_dim,
+    """Flattened widths of the RL state, full-horizon noise and execution window."""
+    joint_dim = policy.normalization_dims.get("joint_state")
+    if type(joint_dim) is not int or joint_dim <= 0:
+        raise ValueError("FlowMatch policy requires a positive joint_state dimension")
+    return (policy.n_obs_steps * (policy.obs_encoder.out_dim + joint_dim),
+            policy.horizon * policy.action_dim,
             policy.n_action_steps * policy.action_dim)
 
 
 class FrozenPolicy:
-    """Compatibility facade retained for DSRL/RFS and existing training scripts.
-
-    Observation encoding, FlowMatch decoding and physical action transforms are
-    delegated to independent components so new policy backends do not extend
-    this class or modify existing algorithms.
-    """
+    """Encode observations and execute FlowMatch windows within robot joint limits."""
 
     def __init__(self, policy, cfg, limits, decode_batch=64):
-        self.policy, self.cfg, self.decode_batch = policy, cfg, decode_batch
+        from ..policies.flowmatch.runtime import FlowMatchActionDecoder, FlowMatchObservationEncoder
+
+        self.policy, self.cfg = policy, cfg
         self.device = next(policy.parameters()).device
         self.observation_encoder = FlowMatchObservationEncoder(policy)
         self.action_decoder = FlowMatchActionDecoder(
@@ -66,12 +63,9 @@ class FrozenPolicy:
             action_dim=policy.action_dim,
             execute_steps=policy.n_action_steps,
         )
-        self.state_dim = self.observation_encoder.state_dim
-        self.noise_dim = self.observation_encoder.noise_dim
-        self.action_dim = policy.n_action_steps * policy.action_dim
+        self.state_dim, self.noise_dim, self.action_dim = policy_dimensions(policy)
         self.limits = self.action_transform.limits
 
-    @torch.no_grad()
     def encode(self, obs):
         return self.observation_encoder.encode(obs)
 

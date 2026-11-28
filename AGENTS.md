@@ -19,6 +19,7 @@
 ## 架构边界
 
 - dexmani_rl/core/ 只定义模型无关的数据规格和 Protocol，不导入具体策略、算法、仿真器或数据集实现。
+- Policy 不依赖 Trainer，Algorithm 不依赖具体 Policy。Method 显式组合 Policy、Algorithm、Representation 和 Environment。新增论文的专属更新规则放在自己的方法中。删除后端后，独立策略必须仍能导入、运行和测试。
 - 新策略在 policies/<backend>/ 实现自己的 Adapter；新论文方法在 methods/<method>/ 管理自己的配置、训练入口和阶段逻辑。共享代码不得反向导入方法包。
 - 不新增全局策略注册表、通用 BaseTrainer 或通用 BaseRLAgent。
 - 动作维度、动作分段和时间窗口从 ActionSpec 或 checkpoint 配置取得，不在训练器中硬编码机器人自由度。
@@ -32,5 +33,3 @@
 - 新增抽象、配置项或依赖前，指出它解决的当前问题。直接实现已经清楚时就到此为止。删除失去用途的机制及其配套代码。
 - 内部函数信任调用约定。外部数据、checkpoint 和设备命令在进入系统处检查关键约束，失败时给出具体错误。回退或重试只用于已有明确恢复方式的故障。
 - 实验写入新目录，保护已有数据和结果。接入实机须有本次授权，并确认硬件配置与控制限幅。
-
-Policy 不依赖 Trainer，Algorithm 不依赖具体 Policy。Method 显式组合 Policy、Algorithm、Representation 和 Environment。新增论文的专属更新规则放在自己的方法中。删除后端后，独立策略必须仍能导入、运行和测试。

@@ -8,11 +8,6 @@ class FlowMatchObservationEncoder:
 
     def __init__(self, policy) -> None:
         self.policy = policy
-        joint_dim = policy.normalization_dims.get("joint_state")
-        if type(joint_dim) is not int or joint_dim <= 0:
-            raise ValueError("FlowMatch policy requires a positive joint_state dimension")
-        self.state_dim = policy.n_obs_steps * (policy.obs_encoder.out_dim + joint_dim)
-        self.noise_dim = policy.horizon * policy.action_dim
 
     @torch.no_grad()
     def encode(self, observation):

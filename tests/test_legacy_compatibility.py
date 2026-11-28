@@ -5,7 +5,7 @@ import unittest
 import torch
 
 from dexmani_rl.common.base_policy import FrozenPolicy, executable_actions as critic_actions
-from test_architecture_contracts import FakeFlowMatchPolicy
+from tests.flowmatch_fixtures import FakeFlowMatchPolicy
 
 
 def policy_dimensions(policy):
