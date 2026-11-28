@@ -20,8 +20,11 @@ class Replay:
         return {key: self.data[key][indices].to(device) for key in fields}
 
     def state_dict(self):
-        return dict(capacity=self.capacity, position=self.position, size=self.size,
-                    data={k: v[:self.size].clone() for k, v in self.data.items()})
+        data = self.data
+        if self.size < self.capacity:
+            # torch.save writes the backing storage of a view, including unused rows.
+            data = {key: value[:self.size].clone() for key, value in data.items()}
+        return dict(capacity=self.capacity, position=self.position, size=self.size, data=data)
 
     def load_state_dict(self, state):
         self.capacity, self.position, self.size = (state[k] for k in ('capacity', 'position', 'size'))

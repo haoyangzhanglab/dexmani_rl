@@ -23,10 +23,12 @@
 """RoboFFT-F, following the official a9ca8c8 Can-state release recipe."""
 import copy
 import math
+
 import numpy as np
 import torch
 from torch import nn
-from .rfs import gae
+
+from .common.returns import gae
 
 
 class RoboFFTActor(nn.Module):
@@ -39,6 +41,11 @@ class RoboFFTActor(nn.Module):
         self.decoder = copy.deepcopy(decoder).eval().requires_grad_(True)
         self.horizon, self.action_dim = horizon, action_dim
         self.inference_steps, self.n_samples, self.noise_std = inference_steps, n_samples, noise_std
+
+    @classmethod
+    def from_policy(cls, policy, policy_cfg, cfg):
+        return cls(policy.action_decoder.model, policy.horizon, policy.action_dim,
+                   policy_cfg['eval']['inference_steps'], cfg['n_samples'], cfg['noise_std'])
 
     @torch.no_grad()
     def sample(self, context, generator=None, eval_mode=False, *, return_clip_fraction=False):

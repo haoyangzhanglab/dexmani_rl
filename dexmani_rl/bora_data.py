@@ -1,8 +1,8 @@
 """Control-frame windows for BORA demonstrations and online replay."""
-from bisect import bisect_right
 import os
-from pathlib import Path
 import tempfile
+from bisect import bisect_right
+from pathlib import Path
 
 import h5py
 import numpy as np
@@ -77,13 +77,8 @@ class FrameReplay:
                 if key in episode:
                     reward[:count] += episode[key][start:end] * self.rewards[coefficient]
 
-            next_frame = start + 1
-            if count == remaining:
-                if done[count - 1]:
-                    next_frame = min(next_frame, end - 1)
-                else:
-                    # The last valid position of a timeout window uses V(final_obs, 0).
-                    next_frame = end
+            # A terminal tail is masked and needs no post-step observation.
+            next_frame = end - 1 if done[count - 1] else end
             offsets = np.arange(1 - self.policy.n_obs_steps, 1)
             current = np.maximum(start + offsets, 0)
             following = np.maximum(next_frame + offsets, 0)
@@ -95,10 +90,10 @@ class FrameReplay:
                 obs[key] = source[current - current[0]]
                 next_obs[key] = source[following - current[0]]
         dims = self.policy.normalization_dims
-        return dict(obs=prepare_observations(obs, normalization_dims=dims, device='cpu'),
-                    next_obs=prepare_observations(next_obs, normalization_dims=dims, device='cpu'),
-                    action=torch.from_numpy(action), reward=torch.from_numpy(reward),
-                    done=torch.from_numpy(done), mask=torch.from_numpy(mask))
+        return {'obs': prepare_observations(obs, normalization_dims=dims, device='cpu'),
+                'next_obs': prepare_observations(next_obs, normalization_dims=dims, device='cpu'),
+                'action': torch.from_numpy(action), 'reward': torch.from_numpy(reward),
+                'done': torch.from_numpy(done), 'mask': torch.from_numpy(mask)}
 
     def _draw(self, count, rng):
         if not len(self):
@@ -113,15 +108,15 @@ class FrameReplay:
                 raise ValueError('A 1:1 mixed batch requires a positive even batch size')
             half = batch_size // 2
             rows = self._draw(half, rng) + online._draw(half, rng)
-        batch = {}
-        for key in ('obs', 'next_obs'):
-            batch[key] = {name: torch.cat([row[key][name] for row in rows]).to(self.device)
-                          for name in rows[0][key]}
-        for key in ('action', 'reward', 'done', 'mask'):
-            batch[key] = torch.stack([row[key] for row in rows]).to(self.device)
-        batch['action'] = self.policy.normalizer['action'].normalize(batch['action'])
-        batch['action'] = batch['action'].masked_fill(~batch['mask'][..., None], 0.)
-        return batch
+        observations = {
+            key: {name: torch.cat([row[key][name] for row in rows]).to(self.device) for name in rows[0][key]}
+            for key in ('obs', 'next_obs')
+        }
+        batch = {key: torch.stack([row[key] for row in rows]).to(self.device)
+                 for key in ('action', 'reward', 'done', 'mask')}
+        action = self.policy.normalizer['action'].normalize(batch['action'])
+        batch['action'] = action.masked_fill(~batch['mask'][..., None], 0.)
+        return {**observations, **batch}
 
 
 @torch.no_grad()
@@ -189,9 +184,9 @@ def collect_episode(env, seed, act, path, rewards, correction=None, blend=1., *,
             episode.attrs.update(task_name=env.env.name, dt=env.env.dt, action_space='joint', seed=seed,
                                  success=bool(info['success']), truncated=bool(truncated))
         os.link(temporary.name, path)
-    return dict(seed=seed, steps=len(actions), success=bool(info['success']), terminated=bool(terminated),
-                truncated=bool(truncated), takeovers=sum(takeovers), recoveries=sum(recoveries),
-                time_reward=len(actions) * rewards['time_penalty'],
-                success_reward=int(bool(info['success']) and terminated) * rewards['success_reward'],
-                takeover_reward=sum(takeovers) * rewards['takeover_penalty'],
-                recovery_reward=sum(recoveries) * rewards['recovery_reward'])
+    return {'seed': seed, 'steps': len(actions), 'success': bool(info['success']), 'terminated': bool(terminated),
+            'truncated': bool(truncated), 'takeovers': sum(takeovers), 'recoveries': sum(recoveries),
+            'time_reward': len(actions) * rewards['time_penalty'],
+            'success_reward': int(bool(info['success']) and terminated) * rewards['success_reward'],
+            'takeover_reward': sum(takeovers) * rewards['takeover_penalty'],
+            'recovery_reward': sum(recoveries) * rewards['recovery_reward']}

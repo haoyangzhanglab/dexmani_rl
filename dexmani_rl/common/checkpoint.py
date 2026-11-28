@@ -8,8 +8,8 @@ def save(path, value):
 
 
 def capture_rng(seed_rng, device):
-    return dict(seed_rng=seed_rng.bit_generator.state, torch_rng=torch.get_rng_state(),
-                cuda_rng=torch.cuda.get_rng_state(device) if device.type == 'cuda' else None)
+    return {'seed_rng': seed_rng.bit_generator.state, 'torch_rng': torch.get_rng_state(),
+            'cuda_rng': torch.cuda.get_rng_state(device) if device.type == 'cuda' else None}
 
 
 def restore_rng(state, seed_rng, device):

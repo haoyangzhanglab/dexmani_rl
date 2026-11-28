@@ -5,15 +5,17 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from pickle import UnpicklingError
+
 import numpy as np
 import torch
 from scipy.stats import binomtest
-from .base_policy import load_policy, FrozenPolicy, policy_dimensions
-from .env import make_env, seed_split
+
+from .bora import BORAActor
+from .common.base_policy import FrozenPolicy, load_policy, policy_dimensions
+from .common.env import make_env, seed_split
 from .dsrl import Actor as DSRLActor
 from .rfs import Actor as RFSActor
 from .robofft import RoboFFTActor
-from .bora import BORAActor
 
 
 @dataclass(frozen=True)
@@ -57,7 +59,7 @@ def rollout(env, base, seed, actor, noise_magnitude, deadline):
         steps += info['steps']
         reward_sum += reward
         if done or truncated:
-            result = dict(seed=seed, success=bool(info['success']), steps=steps, reward=reward_sum)
+            result = {'seed': seed, 'success': bool(info['success']), 'steps': steps, 'reward': reward_sum}
             if robofft:
                 result.update(normalized_clip_fraction=float(np.mean(normalized_clips)),
                               physical_clip_fraction=float(np.mean(physical_clips)))
@@ -66,7 +68,7 @@ def rollout(env, base, seed, actor, noise_magnitude, deadline):
 
 
 def evaluate(policy, cfg, seeds, policies, *, noise_magnitude=None, deadline=float('inf')):
-    results = {name: [] for name in policies}
+    results: dict[str, list[dict]] = {name: [] for name in policies}
     for seed in seeds:
         group = {}
         for name, actor in policies.items():
@@ -99,9 +101,36 @@ def compare(baseline, steered):
     wins = binomtest(int((diff == 1).sum()), count).proportion_ci(.975, method='exact')
     losses = binomtest(int((diff == -1).sum()), count).proportion_ci(.975, method='exact')
     ci = [wins.low - losses.high, wins.high - losses.low]
-    return dict(episodes=count, baseline_successes=int(a.sum()),
-                steered_successes=int(b.sum()), success_rate_delta=float(diff.mean()),
-                paired_conservative_95_ci=ci, training_seeds=1)
+    return {'episodes': count, 'baseline_successes': int(a.sum()),
+            'steered_successes': int(b.sum()), 'success_rate_delta': float(diff.mean()),
+            'paired_conservative_95_ci': ci, 'training_seeds': 1}
+
+
+def evaluation_report(results, seeds):
+    steered = results.get('steered', [])
+    complete = [row['seed'] for row in results['baseline']] == list(seeds)
+    result = dict(results, steered=steered, test_seeds=list(seeds), evaluation_complete=complete)
+    if not complete:
+        result['comparison'] = {'episodes': len(steered), 'requested_episodes': len(seeds),
+                                'evaluation_complete': False}
+        return result
+    result['comparison'] = compare(results['baseline'], steered) if 'steered' in results else {'episodes': 0}
+    if 'sampler_baseline' in results:
+        result['comparison_vs_sampler'] = compare(results['sampler_baseline'], steered)
+    if 'offline' in results:
+        result.update(comparison_offline_vs_bc=compare(results['baseline'], results['offline']),
+                      comparison_vs_offline=compare(results['offline'], steered))
+    return result
+
+
+def evaluate_noise_policy(run, actor, has_updates, *, noise_magnitude=None):
+    policies = {'baseline': None}
+    checkpoint = None
+    if has_updates:
+        checkpoint, policies['steered'] = run.selected_actor(actor)
+    results = evaluate(run.policy, run.policy_cfg, run.test, policies,
+                       noise_magnitude=noise_magnitude, deadline=run.deadline)
+    return dict(algorithm=run.metadata['algorithm'], rl_checkpoint=checkpoint, **evaluation_report(results, run.test))
 
 
 def main():
@@ -145,7 +174,7 @@ def main():
         if args.episodes > len(seeds):
             parser.error(f'--episodes must not exceed the test seed count ({len(seeds)})')
         seeds = seeds[:args.episodes]
-    policies = {'baseline': None}
+    policies: dict[str, torch.nn.Module | BORAStage | None] = {'baseline': None}
     noise_magnitude = None
     if algorithm == 'bora':
         bora = BORAActor(deepcopy(policy), cfg, saved['config'])
@@ -156,10 +185,10 @@ def main():
             policies['offline'] = BORAStage(bora, 0)
         policies['steered'] = BORAStage(bora, round_number)
     elif args.rl_checkpoint:
+        actor: torch.nn.Module
         actor_cfg = saved['config']
         if algorithm == 'robofft':
-            actor = RoboFFTActor(policy.action_decoder.model, policy.horizon, policy.action_dim,
-                                 cfg['eval']['inference_steps'], actor_cfg['n_samples'], actor_cfg['noise_std'])
+            actor = RoboFFTActor.from_policy(policy, cfg, actor_cfg)
             policies['sampler_baseline'] = deepcopy(actor)
         else:
             state_dim, noise_dim, action_dim = policy_dimensions(policy)
@@ -174,25 +203,18 @@ def main():
         actor.eval()
         policies['steered'] = actor
     results = evaluate(policy, cfg, seeds, policies, noise_magnitude=noise_magnitude)
-    baseline, steered = results['baseline'], results['steered'] if args.rl_checkpoint else []
     result = dict(algorithm=algorithm, checkpoint=checkpoint, weights=weights,
                   rl_checkpoint=str(Path(args.rl_checkpoint).resolve()) if args.rl_checkpoint else None,
-                  baseline=baseline, steered=steered,
-                  comparison=compare(baseline, steered) if args.rl_checkpoint else {'episodes': 0})
+                  **evaluation_report(results, seeds))
     if algorithm == 'robofft':
-        result.update(sampler_baseline=results['sampler_baseline'],
-                      selected_iteration=saved['iteration'], selected_actor_updates=saved['actor_updates'],
-                      comparison_vs_sampler=compare(results['sampler_baseline'], steered))
+        result.update(selected_iteration=saved['iteration'], selected_actor_updates=saved['actor_updates'])
     if algorithm == 'bora':
         result['round'] = round_number
-        if 'offline' in results:
-            result.update(offline=results['offline'], comparison_offline_vs_bc=compare(baseline, results['offline']),
-                          comparison_vs_offline=compare(results['offline'], steered))
     output.parent.mkdir(parents=True, exist_ok=True)
     report = json.dumps(result, indent=2)
     with output.open('x') as file:
         file.write(report)
-    print(json.dumps(result['comparison'] if args.rl_checkpoint else {'episodes': len(baseline)}))
+    print(json.dumps(result['comparison'] if args.rl_checkpoint else {'episodes': len(results['baseline'])}))
 
 
 if __name__ == '__main__':

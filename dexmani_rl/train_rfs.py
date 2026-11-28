@@ -1,15 +1,15 @@
-import copy
 import json
 import time
-from contextlib import ExitStack
-import numpy as np
+from contextlib import closing
+
 import torch
-from .base_policy import load_policy, FrozenPolicy
-from .env import make_env, seed_split
-from .evaluate import evaluate, compare
+
+from .common.base_policy import FrozenPolicy
+from .common.checkpoint import restore_rng, save
+from .common.env import make_env, training_episodes
+from .common.training import OnlineRun, training_arguments
+from .evaluate import evaluate, evaluate_noise_policy
 from .rfs import RFS
-from .checkpoint import save, capture_rng, restore_rng
-from .training import actor_snapshot, record_validation, selection_deadline, training_arguments
 
 
 def main():
@@ -19,77 +19,46 @@ def main():
             cfg['rollout_steps'] < 2 or not 0 < cfg['train_hours'] <= cfg['max_hours']):
         raise ValueError('Invalid RFS collection or time budget')
     output = args.output
-    best_path = output / 'best.pt'
-    started = time.monotonic()
-    torch.manual_seed(cfg['seed'])
-    policy, policy_cfg, weights = load_policy(checkpoint, args.device, weights)
-    if saved is None:
-        test_seeds, validation_seeds, excluded = seed_split(policy_cfg['env_runner']['task_name'])
-    else:
-        test_seeds, validation_seeds = saved['test_seeds'], saved['validation_seeds']
-        excluded = set(saved['excluded_seeds'])
+    run = OnlineRun('rfs', args, cfg, checkpoint, weights, saved)
+    policy, policy_cfg = run.policy, run.policy_cfg
     with make_env(policy, policy_cfg) as env:
         base = FrozenPolicy(policy, policy_cfg, env.env.robot.qlimits)
         agent = RFS(base.state_dim, base.noise_dim, base.action_dim, cfg, base.device)
     steps, chunks, updates, last_eval_update, discarded_chunks = 0, 0, 0, 0, 0
-    elapsed, best_score, best_actor = 0., -1., None
-    seed_rng = np.random.default_rng(cfg['seed'])
     if saved is not None:
         agent.load_state_dict(saved['model'])
         agent.optimizer.load_state_dict(saved['optimizer'])
         steps, chunks, updates, last_eval_update, discarded_chunks = (
             saved[k] for k in ('steps', 'chunks', 'updates', 'last_eval_update', 'discarded_chunks'))
-        elapsed, best_score, best_actor = (saved[k] for k in ('elapsed', 'best_score', 'best_actor'))
-        restore_rng(saved, seed_rng, base.device)
+        restore_rng(saved, run.rng, base.device)
         del saved
-    deadline = started + max(0, cfg['max_hours'] * 3600 - elapsed)
-    training_deadline = started + max(0, cfg['train_hours'] * 3600 - elapsed)
-    metadata = dict(algorithm='rfs', config=cfg, base_checkpoint=checkpoint, weights=weights,
-                    torch=str(torch.__version__),
-                    test_seeds=test_seeds, validation_seeds=validation_seeds,
-                    excluded_seeds=sorted(excluded))
-    output.mkdir(parents=True, exist_ok=False)
-    (output / 'config.json').write_text(json.dumps(dict(metadata, policy_config=policy_cfg), indent=2))
+    deadline, training_deadline = run.deadline, run.training_deadline
+    run.open_output()
 
     def snapshot():
-        return dict(metadata, model=agent.state_dict(), optimizer=agent.optimizer.state_dict(),
+        return dict(run.snapshot_fields(base.device), model=agent.state_dict(), optimizer=agent.optimizer.state_dict(),
             steps=steps, chunks=chunks, updates=updates, last_eval_update=last_eval_update,
-            discarded_chunks=discarded_chunks, elapsed=elapsed + time.monotonic() - started,
-            best_score=best_score, best_actor=best_actor,
-            **capture_rng(seed_rng, base.device))
+            discarded_chunks=discarded_chunks)
 
     def validate(end, phase, log):
-        nonlocal best_score, best_actor, last_eval_update
-        results = evaluate(policy, policy_cfg, validation_seeds, {'steered': agent.actor}, deadline=end)['steered']
-        score = record_validation(results, len(validation_seeds), phase, log, steps=steps, updates=updates)
-        if score is None:
-            return
-        last_eval_update = updates
-        if score > best_score:
-            best_score, best_actor = score, actor_snapshot(agent.actor)
-            save(best_path, {**metadata, 'actor': best_actor})
+        nonlocal last_eval_update
+        results = evaluate(policy, policy_cfg, run.validation, {'steered': agent.actor}, deadline=end)['steered']
+        if run.record_validation(results, agent.actor, phase, log, {'steps': steps, 'updates': updates}) is not None:
+            last_eval_update = updates
 
-    from dexmani_sim import EpisodeRejected
-    with (output / 'metrics.jsonl').open('a', buffering=1) as log, ExitStack() as environments:
-        needs_reset, reset_attempts = True, 25
+    with (output / 'metrics.jsonl').open('a', buffering=1) as log, closing(
+            training_episodes(policy, policy_cfg, run.rng, run.excluded, training_deadline, log)) as episodes:
+        needs_reset = True
         while steps < cfg['total_steps'] and time.monotonic() < training_deadline:
-            transitions, clip_fractions = [], []
+            transitions: list[dict[str, torch.Tensor]] = []
+            clip_fractions = []
             while (len(transitions) < cfg['rollout_steps'] and steps < cfg['total_steps'] and
                    time.monotonic() < training_deadline):
                 if needs_reset:
-                    if reset_attempts == 25:
-                        environments.close()
-                        env = environments.enter_context(make_env(policy, policy_cfg))
-                        reset_attempts = 0
-                    seed = int(seed_rng.integers(2**32))
-                    if seed in excluded:
-                        continue
-                    reset_attempts += 1
-                    try:
-                        obs = env.reset(seed)
-                    except EpisodeRejected as error:
-                        log.write(json.dumps(dict(rejected_seed=seed, error=str(error))) + '\n')
-                        continue
+                    episode = next(episodes, None)
+                    if episode is None:
+                        break
+                    env, seed, obs = episode
                     context, state = base.encode(obs)
                     episode_steps, episode_reward = 0, 0.
                     needs_reset = False
@@ -104,11 +73,11 @@ def main():
                 next_context, next_state = base.encode(obs)
                 with torch.no_grad():
                     next_value = agent.value(next_state)
-                transitions.append(dict(state=state[0], joint=joint[0], log_prob=log_prob[0],
-                    value=value[0], next_value=next_value[0],
-                    reward=torch.tensor([reward], device=base.device),
-                    terminated=torch.tensor([bool(terminated)], device=base.device),
-                    truncated=torch.tensor([bool(truncated)], device=base.device)))
+                transitions.append({'state': state[0], 'joint': joint[0], 'log_prob': log_prob[0],
+                                    'value': value[0], 'next_value': next_value[0],
+                                    'reward': torch.tensor([reward], device=base.device),
+                                    'terminated': torch.tensor([bool(terminated)], device=base.device),
+                                    'truncated': torch.tensor([bool(truncated)], device=base.device)})
                 clip_fractions.append(clip_fraction)
                 steps += info['steps']
                 chunks += 1
@@ -117,8 +86,8 @@ def main():
                 context, state = next_context, next_state
                 needs_reset = terminated or truncated
                 if needs_reset:
-                    log.write(json.dumps(dict(episode_seed=seed, success=bool(info['success']),
-                        episode_steps=episode_steps, episode_reward=episode_reward, steps=steps)) + '\n')
+                    log.write(json.dumps({'episode_seed': seed, 'success': bool(info['success']),
+                                          'episode_steps': episode_steps, 'episode_reward': episode_reward, 'steps': steps}) + '\n')
             # Pending on-policy samples are never carried across a resume or time limit.
             if not transitions or time.monotonic() >= training_deadline:
                 discarded_chunks += len(transitions)
@@ -132,29 +101,15 @@ def main():
             if updates - last_eval_update >= cfg['eval_interval_updates'] and time.monotonic() < training_deadline:
                 validate(training_deadline, 'scheduled', log)
             save(output / 'resume.pt', snapshot())
-        environments.close()
+        episodes.close()
         if updates != last_eval_update and time.monotonic() < deadline:
-            end = selection_deadline(training_deadline, deadline, time.monotonic(),
-                                     len(validation_seeds), 2 * len(test_seeds))
+            end = run.selection_deadline(2)
             validate(end, 'final', log)
-        log.write(json.dumps(dict(steps=steps, chunks=chunks, updates=updates,
-                                  discarded_chunks=discarded_chunks)) + '\n')
-    save(output / 'last.pt', {**metadata, 'actor': agent.actor.state_dict()})
+        log.write(json.dumps({'steps': steps, 'chunks': chunks, 'updates': updates,
+                              'discarded_chunks': discarded_chunks}) + '\n')
+    save(output / 'last.pt', {**run.metadata, 'actor': agent.actor.state_dict()})
     save(output / 'resume.pt', snapshot())
-    actor = agent.actor
-    if best_actor is not None:
-        if not best_path.exists():
-            save(best_path, {**metadata, 'actor': best_actor})
-        actor = copy.deepcopy(agent.actor)
-        actor.load_state_dict(best_actor)
-    policies = {'baseline': None}
-    if updates:
-        policies['steered'] = actor
-    results = evaluate(policy, policy_cfg, test_seeds, policies, deadline=deadline)
-    baseline, steered = results['baseline'], results['steered'] if updates else []
-    evaluated_checkpoint = ('best.pt' if best_actor is not None else 'last.pt') if updates else None
-    result = dict(algorithm='rfs', rl_checkpoint=evaluated_checkpoint, baseline=baseline, steered=steered,
-                  comparison=compare(baseline, steered) if updates else {'episodes': 0})
+    result = evaluate_noise_policy(run, agent.actor, updates > 0)
     (output / 'evaluation.json').write_text(json.dumps(result, indent=2))
     save(output / 'resume.pt', snapshot())
     print(json.dumps(result['comparison']))

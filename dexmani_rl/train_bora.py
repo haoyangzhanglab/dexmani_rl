@@ -7,18 +7,18 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .base_policy import FrozenPolicy, load_policy
 from .bora import BORA
 from .bora_data import FrameReplay, collect_episode
-from .checkpoint import capture_rng, restore_rng, save
-from .env import make_env, seed_split
-from .training import training_arguments
+from .common.base_policy import FrozenPolicy, load_policy
+from .common.checkpoint import capture_rng, restore_rng, save
+from .common.env import make_env, seed_split
+from .common.training import training_arguments
 
 
 def main(correction=None, confirm_recovery=None):
+    args, cfg, checkpoint, weights, saved = training_arguments('bora')
     from dexmani_sim import DATA_DIR, EpisodeRejected
 
-    args, cfg, checkpoint, weights, saved = training_arguments('bora')
     through = ('offline', 'round1', 'round2').index(args.through)
     for key in ('offline_updates', 'offline_batch_size', 'online_batch_size', 'episodes_per_round',
                 'updates_per_episode', 'save_interval'):
@@ -47,7 +47,7 @@ def main(correction=None, confirm_recovery=None):
     online = FrameReplay(online_files, policy, bc_cfg, rewards, excluded_seeds=excluded)
     agent = BORA(policy, bc_cfg, cfg)
     offline_steps = episodes = 0
-    if saved:
+    if saved is not None:
         agent.load_state_dict(saved['model'])
         offline_steps, episodes = saved['offline_steps'], saved['episodes']
         round_number = int(agent.actor.round_number)
@@ -65,10 +65,10 @@ def main(correction=None, confirm_recovery=None):
     version = None
     if shutil.which('git'):
         version = subprocess.run(['git', 'describe', '--always', '--dirty', '--abbrev=40'],
-            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True).stdout.strip()
-    metadata = dict(algorithm='bora', config=cfg, base_checkpoint=checkpoint, weights=weights,
-                    git_revision=version or None, torch=str(torch.__version__), test_seeds=test_seeds,
-                    excluded_seeds=sorted(excluded), demo_files=[str(p) for p in demo_files])
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False).stdout.strip()
+    metadata = {'algorithm': 'bora', 'config': cfg, 'base_checkpoint': checkpoint, 'weights': weights,
+                'git_revision': version or None, 'torch': str(torch.__version__), 'test_seeds': test_seeds,
+                'excluded_seeds': sorted(excluded), 'demo_files': [str(p) for p in demo_files]}
     (output / 'config.json').write_text(json.dumps(dict(metadata, policy_config=bc_cfg,
         resumed_from=args.resume, correction_enabled=correction is not None,
         recovery_confirmation_enabled=confirm_recovery is not None), indent=2))
@@ -109,7 +109,7 @@ def main(correction=None, confirm_recovery=None):
             with make_env(policy, bc_cfg) as env:
                 base = FrozenPolicy(policy, bc_cfg, env.env.robot.qlimits)
 
-                def act(obs):
+                def act(obs, base=base):
                     return base.bounded_physical(agent.actor.normalized_actions(obs))[0]
 
                 try:
@@ -130,8 +130,8 @@ def main(correction=None, confirm_recovery=None):
                 snapshot()
         snapshot()
         export('last.pt')
-    print(json.dumps(dict(round=int(agent.actor.round_number), offline_steps=offline_steps, episodes=episodes,
-                          checkpoint=str(output / 'last.pt'))))
+    print(json.dumps({'round': int(agent.actor.round_number), 'offline_steps': offline_steps, 'episodes': episodes,
+                      'checkpoint': str(output / 'last.pt')}))
 
 
 if __name__ == '__main__':

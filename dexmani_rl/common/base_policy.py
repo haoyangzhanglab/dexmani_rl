@@ -1,6 +1,7 @@
 import torch
-from .policy.flowmatch import FlowMatch
-from .policy.normalizer import normalization_feature_shapes
+
+from ..policy.flowmatch import FlowMatch
+from ..policy.normalizer import normalization_feature_shapes
 
 
 def load_policy(path, device, weights=None):

@@ -1,14 +1,18 @@
+import json
+import random
+import time
 from collections import deque
 from contextlib import contextmanager
-import random
+
 import numpy as np
-from .policy.preprocess import prepare_observations
+
+from ..policy.preprocess import prepare_observations
 
 
 class ChunkEnv:
     def __init__(self, env, policy, cfg):
         self.env, self.policy = env, policy
-        self.history = deque(maxlen=policy.n_obs_steps)
+        self.history: deque[dict[str, np.ndarray]] = deque(maxlen=policy.n_obs_steps)
         if not np.isclose(env.dt, cfg['control_dt_s'], rtol=1e-6):
             raise ValueError('Control period differs from checkpoint')
 
@@ -58,3 +62,22 @@ def seed_split(task):
     seeds.sort()
     random.Random(1024).shuffle(seeds)
     return seeds[:100], seeds[-20:], set(seeds)
+
+
+def training_episodes(policy, cfg, rng, excluded, deadline, log):
+    from dexmani_sim import EpisodeRejected
+
+    while time.monotonic() < deadline:
+        with make_env(policy, cfg) as env:
+            attempts = 0
+            while attempts < 25 and time.monotonic() < deadline:
+                seed = int(rng.integers(2**32))
+                if seed in excluded:
+                    continue
+                attempts += 1
+                try:
+                    obs = env.reset(seed)
+                except EpisodeRejected as error:
+                    log.write(json.dumps({'rejected_seed': seed, 'error': str(error)}) + '\n')
+                    continue
+                yield env, seed, obs

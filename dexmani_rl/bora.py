@@ -1,11 +1,11 @@
 """BORA v2 on a FlowMatch base. The time axis below is in control steps."""
-from copy import deepcopy
 import math
+from copy import deepcopy
 
 import torch
 from torch import nn
 
-from .base_policy import executable_actions
+from .common.base_policy import executable_actions
 
 
 def masked_mean(value, mask):
