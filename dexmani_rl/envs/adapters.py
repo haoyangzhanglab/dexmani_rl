@@ -1,4 +1,4 @@
-"""Environment adapters and compatibility bridges."""
+"""Map chunk execution results to the environment contract."""
 
 from typing import Any
 
@@ -32,4 +32,3 @@ class ChunkEnvAdapter:
 
     def close(self) -> None:
         """No-op: the caller that created the wrapped context owns its lifetime."""
-        return None

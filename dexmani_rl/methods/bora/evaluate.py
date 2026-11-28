@@ -1,18 +1,16 @@
-import json
 import time
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 
-from dexmani_rl.envs.dexmani_sim import make_flowmatch_env, seed_split
+from dexmani_rl.envs.dexmani_sim import make_flowmatch_env
 from dexmani_rl.evaluation.metrics import compare
 from dexmani_rl.evaluation.metrics import evaluation_report as paired_report
 from dexmani_rl.policies.flowmatch.loader import load_flowmatch_policy
 from dexmani_rl.policies.flowmatch.rl_runtime import FlowMatchRLRuntime
 
-from .._shared.cli import evaluation_inputs
+from .._shared.cli import evaluation_inputs, evaluation_seeds, write_evaluation
 from .algorithm import BORAActor
 
 
@@ -49,8 +47,7 @@ def rollout(env, base, seed, actor, deadline):
         steps += info['steps']
         reward_sum += reward
         if done or truncated:
-            result = {'seed': seed, 'success': bool(info['success']), 'steps': steps, 'reward': reward_sum}
-            return result
+            return {'seed': seed, 'success': bool(info['success']), 'steps': steps, 'reward': reward_sum}
     return None
 
 
@@ -77,15 +74,8 @@ def evaluate(policy, cfg, seeds, policies, *, deadline=float('inf')):
 def main():
     args, checkpoint, weights, saved = evaluation_inputs('bora')
     policy, cfg, weights = load_flowmatch_policy(checkpoint, args.device, weights)
-    if args.rl_checkpoint:
-        seeds = saved['test_seeds']
-    else:
-        seeds, _, _ = seed_split(cfg['env_runner']['task_name'])
-    if args.episodes is not None:
-        if args.episodes > len(seeds):
-            raise ValueError(f'--episodes must not exceed the test seed count ({len(seeds)})')
-        seeds = seeds[:args.episodes]
-    policies = {'baseline': None}
+    seeds = evaluation_seeds(saved, cfg, args.episodes)
+    policies: dict[str, BORAStage | None] = {'baseline': None}
     if saved is not None:
         bora = BORAActor(deepcopy(policy), cfg, saved['config'])
         bora.load_state_dict(saved['actor'])
@@ -95,17 +85,10 @@ def main():
             policies['offline'] = BORAStage(bora, 0)
         policies['steered'] = BORAStage(bora, round_number)
     results = evaluate(policy, cfg, seeds, policies)
-    result = dict(algorithm='bora' if saved is not None else 'bc', checkpoint=checkpoint, weights=weights,
-                  rl_checkpoint=str(Path(args.rl_checkpoint).resolve()) if args.rl_checkpoint else None,
-                  **evaluation_report(results, seeds))
+    report = evaluation_report(results, seeds)
     if saved is not None:
-        result['round'] = round_number
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    report = json.dumps(result, indent=2)
-    with output.open('x') as file:
-        file.write(report)
-    print(json.dumps(result['comparison'] if args.rl_checkpoint else {'episodes': len(results['baseline'])}))
+        report['round'] = round_number
+    write_evaluation(args, checkpoint, weights, saved, report)
 
 
 if __name__ == '__main__':

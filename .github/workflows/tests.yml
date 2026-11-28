@@ -25,7 +25,7 @@ jobs:
       - name: Install CPU dependencies
         run: |
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1+cpu torchvision==0.19.1+cpu
-          python -m pip install -e .
+          python -m pip install .
           python -m pip check
       - name: Unit tests
         run: python -m unittest discover -s tests -v
@@ -35,9 +35,12 @@ jobs:
           python -c "import dexmani_rl.core"
           python -c "import dexmani_rl.policies"
           python -c "import dexmani_rl.envs.adapters"
-      - name: Check method entry points
+      - name: Check installed recipes and method entry points
+        working-directory: ${{ runner.temp }}
         run: |
+          recipes=$(python -c 'from dexmani_rl.methods._shared.cli import RECIPE_DIR; print(RECIPE_DIR)')
           for method in dsrl rfs robofft bora; do
+            cmp "$GITHUB_WORKSPACE/configs/methods/$method.yaml" "$recipes/$method.yaml"
             python -m "dexmani_rl.methods.${method}.train" --help
             python -m "dexmani_rl.methods.${method}.evaluate" --help
           done

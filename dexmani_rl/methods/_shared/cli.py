@@ -1,9 +1,12 @@
 import argparse
+import json
 from pathlib import Path
 from pickle import UnpicklingError
 
 import torch
 from omegaconf import OmegaConf
+
+RECIPE_DIR = Path(__file__).resolve().parents[2] / 'recipes'
 
 
 def training_parser():
@@ -30,12 +33,7 @@ def training_inputs(parser, args, *, method, default_config):
             parser.error(f'--resume requires a {method} training snapshot (resume.pt)')
         return saved['config'], saved['base_checkpoint'], saved['weights'], saved
 
-    config_path = args.config
-    if config_path is None:
-        config_path = default_config
-        if not config_path.is_file():
-            parser.error('Default configuration is unavailable. Pass --config with a YAML file.')
-    cfg = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)
+    cfg = OmegaConf.to_container(OmegaConf.load(args.config or default_config), resolve=True)
     return cfg, str(Path(args.checkpoint).resolve()), args.weights, None
 
 
@@ -46,14 +44,13 @@ def evaluation_inputs(method):
     source.add_argument('--rl-checkpoint')
     parser.add_argument('--weights', choices=['ema', 'raw'])
     parser.add_argument('--device', default='cuda:0')
-    parser.add_argument('--output', required=True)
+    parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--episodes', type=int, help='default: full test pool (100)')
     args = parser.parse_args()
     if args.episodes is not None and args.episodes <= 0:
         parser.error('--episodes must be positive')
-    output = Path(args.output)
-    if output.exists():
-        raise FileExistsError(output)
+    if args.output.exists():
+        raise FileExistsError(args.output)
     saved = None
     if args.rl_checkpoint:
         if args.weights:
@@ -71,3 +68,27 @@ def evaluation_inputs(method):
     else:
         checkpoint, weights = str(Path(args.checkpoint).resolve()), args.weights
     return args, checkpoint, weights, saved
+
+
+def evaluation_seeds(saved, policy_cfg, episodes):
+    if saved is None:
+        from dexmani_rl.envs.dexmani_sim import seed_split
+        seeds, _, _ = seed_split(policy_cfg['env_runner']['task_name'])
+    else:
+        seeds = saved['test_seeds']
+    if episodes is not None and episodes > len(seeds):
+        raise ValueError(f'--episodes must not exceed the test seed count ({len(seeds)})')
+    return seeds[:episodes]
+
+
+def write_evaluation(args, checkpoint, weights, saved, report):
+    result = dict(algorithm=saved['algorithm'] if saved is not None else 'bc',
+                  checkpoint=checkpoint, weights=weights,
+                  rl_checkpoint=str(Path(args.rl_checkpoint).resolve()) if args.rl_checkpoint else None,
+                  **report)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(result, indent=2)
+    with args.output.open('x') as file:
+        file.write(serialized)
+    summary = report['comparison'] if saved is not None else {'episodes': len(report['baseline'])}
+    print(json.dumps(summary))

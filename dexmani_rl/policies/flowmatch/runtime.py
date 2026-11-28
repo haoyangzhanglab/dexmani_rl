@@ -4,7 +4,7 @@ import torch
 
 
 class FlowMatchObservationEncoder:
-    """Build the observation context and the compact state used by legacy RL agents."""
+    """Build the observation context and the compact state used by the online RL methods."""
 
     def __init__(self, policy) -> None:
         self.policy = policy

@@ -10,3 +10,6 @@ dependencies = ["torch>=2.4,<2.5", "torchvision>=0.19,<0.20", "numpy>=1.26,<2", 
 lora = ["peft"]
 [tool.setuptools.packages.find]
 include = ["dexmani_rl*"]
+namespaces = false
+[tool.setuptools.package-data]
+dexmani_rl = ["recipes/*.yaml"]

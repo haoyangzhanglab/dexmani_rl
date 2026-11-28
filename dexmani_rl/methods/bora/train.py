@@ -11,12 +11,12 @@ from dexmani_rl.envs.action_transform import JointActionTransform
 from dexmani_rl.envs.dexmani_sim import make_flowmatch_env, seed_split
 from dexmani_rl.policies.flowmatch.loader import load_flowmatch_policy
 
-from .._shared.cli import training_inputs, training_parser
+from .._shared.cli import RECIPE_DIR, training_inputs, training_parser
 from .._shared.torch_checkpoint import capture_rng, restore_rng, save
 from .algorithm import BORA
 from .data import FrameReplay, collect_episode
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / 'configs' / 'methods' / 'bora.yaml'
+DEFAULT_CONFIG = RECIPE_DIR / 'bora.yaml'
 
 
 def main(correction=None, confirm_recovery=None):

@@ -39,7 +39,7 @@ Do not modify existing policy adapters or algorithms merely to register a new mo
 
 ## Adding a method
 
-Give the paper its own methods/<method>/ package, configuration, and entry point. It may compose a policy adapter, one or more algorithms, representations, data sources, and an environment adapter. Keep paper-specific losses, schedules, and training stages inside that method.
+Give the paper its own `methods/<method>/` package and entry points. It may compose a policy adapter, one or more algorithms, representations, data sources, and an environment adapter. Keep paper-specific losses, schedules, and training stages inside that method. Each training entry point names its default YAML in `configs/methods/`. The package data directory `dexmani_rl/recipes` links to that directory so the wheel ships the same four recipes.
 
 Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and generative-policy matching have materially different update lifecycles. Methods own rollout and actor loading. Shared evaluation metrics operate on paired results.
 

@@ -32,7 +32,7 @@ DexMani RL 在 dexmani_sim 的 xArm7 + XHand 仿真中研究灵巧手 FlowMatch 
 python -m pip install -e .
 ~~~
 
-仿真训练还需要安装 dexmani_sim，并准备与 BC checkpoint 匹配的任务资产和 seed 池。
+FlowMatch 的点云编码使用 PyTorch3D 的 FPS 和 kNN 算子。仿真训练和评估还需要 dexmani_sim，以及与 BC checkpoint 匹配的任务资产和 seed 池。
 
 ## 常用命令
 

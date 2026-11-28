@@ -1,20 +1,19 @@
 import json
 import time
-from pathlib import Path
 
 import torch
 
 from dexmani_rl.envs.dexmani_sim import make_flowmatch_env
 from dexmani_rl.policies.flowmatch.rl_runtime import FlowMatchRLRuntime
 
-from .._shared.cli import training_inputs, training_parser
+from .._shared.cli import RECIPE_DIR, training_inputs, training_parser
 from .._shared.flowmatch_online import FlowMatchOnlineRun
 from .._shared.torch_checkpoint import restore_rng, save
 from .algorithm import DSRL
 from .evaluate import evaluate, evaluate_noise_policy
 from .replay import Replay
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / 'configs' / 'methods' / 'dsrl.yaml'
+DEFAULT_CONFIG = RECIPE_DIR / 'dsrl.yaml'
 
 
 def main():
