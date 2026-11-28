@@ -23,7 +23,7 @@ The core package must not import a policy, algorithm, simulator, or dataset impl
 ## Stable contracts
 
 - ActionSpec describes action segments, prediction horizon, execution prefix, and control period. It does not encode or decode actions.
-- PolicyAdapter exposes action_spec and predict. Model-specific features can be returned in PolicyOutput.auxiliary without expanding the common interface for every paper.
+- PolicyAdapter exposes action_spec and predict. PolicyOutput.action follows the declared ActionSpec and may be a physical command or a latent action representation. If it is latent, the method must decode it before calling EnvAdapter.step. Model-specific features can be returned in PolicyOutput.auxiliary without expanding the common interface for every paper.
 - EnvAdapter exposes reset, step returning StepResult, and close.
 - ActionCodec and MotionPrior should be introduced as separate representation contracts when their first concrete implementation lands. A temporal codec and a history-conditioned prior are not the same abstraction and must not be forced into one class.
 
@@ -41,7 +41,7 @@ Do not modify existing policy adapters, RL algorithms, or the shared evaluator m
 
 Give the paper its own methods/<method>/ package, configuration, and entry point. It may compose a policy adapter, one or more algorithms, representations, data sources, and an environment adapter. Keep paper-specific losses, schedules, and training stages inside that method.
 
-Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and generative-policy matching have materially different update lifecycles.
+Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and generative-policy matching have materially different update lifecycles. The current evaluate.py remains the compatibility evaluator for the four existing methods; a new method should own its evaluation entry point or use a genuinely generic adapter evaluator rather than adding method-specific branches to the legacy file.
 
 ## Removing a method or policy
 
