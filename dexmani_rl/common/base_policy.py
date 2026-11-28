@@ -1,10 +1,17 @@
+"""BC checkpoint loading and backwards-compatible FlowMatch RL runtime."""
+
 import torch
 
-from ..policy.flowmatch import FlowMatch
-from ..policy.normalizer import normalization_feature_shapes
+from ..envs.action_transform import JointActionTransform, executable_actions, joint_targets
+from ..policies.flowmatch.runtime import FlowMatchActionDecoder, FlowMatchObservationEncoder
 
 
 def load_policy(path, device, weights=None):
+    # Keep model-specific imports lazy: importing the common runtime must not
+    # eagerly import vision backbones or optional VLA dependencies.
+    from ..policy.flowmatch import FlowMatch
+    from ..policy.normalizer import normalization_feature_shapes
+
     checkpoint = torch.load(path, map_location='cpu', weights_only=True, mmap=True)
     if not isinstance(checkpoint, dict) or 'effective_config' not in checkpoint:
         raise ValueError('Expected a BC checkpoint with effective_config')
@@ -34,67 +41,58 @@ def load_policy(path, device, weights=None):
 
 
 def policy_dimensions(policy):
-    return (policy.n_obs_steps * (policy.obs_encoder.out_dim + 19),
-            policy.horizon * policy.action_dim,
+    observation = FlowMatchObservationEncoder(policy)
+    return (observation.state_dim,
+            observation.noise_dim,
             policy.n_action_steps * policy.action_dim)
 
 
-def joint_targets(window, normalizer, limits):
-    """Return requested and executable joint targets in radians."""
-    requested = normalizer.unnormalize(window)
-    return requested, requested.clamp(limits[:, 0], limits[:, 1])
-
-
-def executable_actions(window, normalizer, limits):
-    """Express the command the robot can execute in the critic's training coordinates."""
-    _, applied = joint_targets(window, normalizer, limits)
-    return normalizer.normalize(applied)
-
-
 class FrozenPolicy:
+    """Compatibility facade retained for DSRL/RFS and existing training scripts.
+
+    Observation encoding, FlowMatch decoding and physical action transforms are
+    delegated to independent components so new policy backends do not extend
+    this class or modify existing algorithms.
+    """
+
     def __init__(self, policy, cfg, limits, decode_batch=64):
         self.policy, self.cfg, self.decode_batch = policy, cfg, decode_batch
         self.device = next(policy.parameters()).device
-        self.state_dim, self.noise_dim, self.action_dim = policy_dimensions(policy)
-        self.limits = torch.as_tensor(limits, device=self.device, dtype=torch.float32)
+        self.observation_encoder = FlowMatchObservationEncoder(policy)
+        self.action_decoder = FlowMatchActionDecoder(
+            policy, cfg['eval']['inference_steps'], decode_batch=decode_batch)
+        self.action_transform = JointActionTransform(
+            policy.normalizer['action'], limits,
+            action_dim=policy.action_dim,
+            execute_steps=policy.n_action_steps,
+        )
+        self.state_dim = self.observation_encoder.state_dim
+        self.noise_dim = self.observation_encoder.noise_dim
+        self.action_dim = policy.n_action_steps * policy.action_dim
+        self.limits = self.action_transform.limits.to(self.device)
 
     @torch.no_grad()
     def encode(self, obs):
-        context = self.policy.encode_observations(obs)
-        frames = context.unflatten(1, (self.policy.n_obs_steps, -1))
-        joint = obs['joint_state']
-        if 'joint_state' in self.policy.normalizer.fields:
-            joint = self.policy.normalizer['joint_state'].normalize(joint)
-        state = torch.cat((frames[:, :, :-1].mean(2), joint), -1).flatten(1)
-        return context, state
+        return self.observation_encoder.encode(obs)
 
     @torch.no_grad()
     def actions(self, context, noise, residual=None, *, return_clip_fraction=False):
-        chunks = []
-        for c, w in zip(context.split(self.decode_batch), noise.split(self.decode_batch)):
-            action = self.policy.decode_condition(c, w.reshape(-1, self.policy.horizon, self.policy.action_dim),
-                                                  self.cfg['eval']['inference_steps'])
-            chunks.append(action[:, :self.policy.n_action_steps])
-        normalized = torch.cat(chunks)
+        normalized = self.action_decoder.decode(context, noise)
         if residual is not None:
             normalized = normalized + residual.reshape_as(normalized)
-        physical, clipped = joint_targets(normalized, self.policy.normalizer['action'], self.limits)
-        actions = self.policy.normalizer['action'].normalize(clipped).flatten(1)
-        if return_clip_fraction:
-            return actions, (physical != clipped).float().mean()
-        return actions
+        return self.action_transform.executable_coordinates(
+            normalized, return_clip_fraction=return_clip_fraction)
 
     @torch.no_grad()
     def robofft_actions(self, normalized):
-        """Convert the execution window without changing the full matching sample."""
+        """Convert RoboFFT's execution window without changing its matching sample."""
         start = self.policy.n_obs_steps - 1
         window = normalized[:, start:start + self.policy.n_action_steps]
         physical, clipped = joint_targets(window, self.policy.normalizer['action'], self.limits)
         return clipped, (physical != clipped).float().mean()
 
     def bounded_physical(self, window):
-        """Map a normalized execution window to joint targets in radians."""
-        return joint_targets(window, self.policy.normalizer['action'], self.limits)[1]
+        return self.action_transform.bounded_physical(window)
 
     def physical(self, actions):
-        return self.policy.normalizer['action'].unnormalize(actions.reshape(-1, self.policy.n_action_steps, self.policy.action_dim))
+        return self.action_transform.physical(actions)
