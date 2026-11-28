@@ -4,7 +4,10 @@ import unittest
 
 import torch
 
-from dexmani_rl.common.base_policy import FrozenPolicy, executable_actions as critic_actions
+from dexmani_rl import bora
+from dexmani_rl.common import base_policy
+from dexmani_rl.common.base_policy import FrozenPolicy
+from dexmani_rl.envs.action_transform import executable_actions as critic_actions
 from tests.flowmatch_fixtures import FakeFlowMatchPolicy
 
 
@@ -120,12 +123,16 @@ class LegacyCompatibilityTests(unittest.TestCase):
             torch.testing.assert_close(new.bounded_physical(noise), old.bounded_physical(noise))
             torch.testing.assert_close(new.robofft_actions(noise), old.robofft_actions(noise))
 
+    def test_bora_action_transform_ownership(self):
+        self.assertIs(bora.executable_actions, critic_actions)
+        self.assertFalse(hasattr(base_policy, "executable_actions"))
+
     def test_critic_coordinates_and_boundary_gradient(self):
         field = Affine()
         limits = torch.tensor([[-1., 1.]])
         window = field.normalize(torch.arange(-2., 3.)[:, None]).requires_grad_()
         expected = executable_actions(window, field, limits)
-        actual = critic_actions(window, field, limits)
+        actual = bora.executable_actions(window, field, limits)
         torch.testing.assert_close(actual, expected)
         torch.testing.assert_close(torch.autograd.grad(actual.sum(), window)[0],
                                    torch.autograd.grad(expected.sum(), window)[0])

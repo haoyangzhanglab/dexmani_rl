@@ -5,7 +5,7 @@ from copy import deepcopy
 import torch
 from torch import nn
 
-from .common.base_policy import executable_actions
+from .envs.action_transform import executable_actions
 
 
 def masked_mean(value, mask):
