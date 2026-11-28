@@ -2,7 +2,7 @@
 
 import torch
 
-from ..envs.action_transform import JointActionTransform, executable_actions, joint_targets
+from ..envs.action_transform import JointActionTransform, joint_targets
 
 
 def load_policy(path, device, weights=None):

@@ -50,21 +50,15 @@ class ArchitectureContractTests(unittest.TestCase):
     def test_core_import_does_not_load_policy_backends(self):
         code = """
 import sys
-sys.modules['dexmani_rl.policies.flowmatch'] = None
-sys.modules['dexmani_rl.policy'] = None
-from dexmani_rl.core import ActionSegment, ActionSpec, PolicyOutput
+import dexmani_rl.core
 import dexmani_rl.envs.adapters
 import dexmani_rl.policies
 
-class IndependentPolicy:
-    action_spec = ActionSpec((ActionSegment('hand', 1, 'latent', 'normalized'),))
-    def predict(self, observation):
-        return PolicyOutput(action=[observation])
-
-assert IndependentPolicy().predict(3).action == [3]
+assert 'dexmani_rl.policy' not in sys.modules
+assert not any(name.startswith('dexmani_rl.policies.') for name in sys.modules)
 assert not {'torch', 'torchvision', 'transformers', 'timm', 'dexmani_sim'}.intersection(sys.modules)
 """
-        subprocess.run([sys.executable, "-S", "-c", code], check=True)
+        subprocess.run([sys.executable, "-E", "-S", "-c", code], check=True)
 
     def test_legacy_joint_helpers_without_flowmatch(self):
         code = """
@@ -72,7 +66,7 @@ import sys
 sys.modules['dexmani_rl.policies.flowmatch'] = None
 sys.modules['dexmani_rl.policy'] = None
 import torch
-from dexmani_rl.common.base_policy import joint_targets, executable_actions
+from dexmani_rl.envs.action_transform import joint_targets, executable_actions
 from tests.flowmatch_fixtures import IdentityField
 field = IdentityField()
 window = torch.tensor([[[2., -0.5]]])
@@ -87,7 +81,6 @@ torch.testing.assert_close(executable_actions(window, field, limits), expected)
         code = """
 import sys
 import dexmani_rl.policies.flowmatch.adapter
-from dexmani_rl.common.base_policy import executable_actions
 import dexmani_rl.dsrl, dexmani_rl.rfs, dexmani_rl.robofft, dexmani_rl.bora
 import dexmani_rl.train_dsrl, dexmani_rl.train_rfs, dexmani_rl.train_robofft, dexmani_rl.train_bora
 assert not {'dexmani_rl.policy.flowmatch', 'torchvision', 'transformers', 'timm', 'dexmani_sim'}.intersection(sys.modules)
