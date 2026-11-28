@@ -50,9 +50,10 @@ A method owns its configuration and imports. Remove its package, configuration, 
 ## FlowMatch runtime
 
 The network lives in `policies/flowmatch/model/`. The runtime and inference adapter live in
-`policies/flowmatch/`. BC construction and weight loading live in `loader.py`. Training and evaluation use `FlowMatchRLRuntime` for observation
-encoding, decoding and joint limits. Training scripts consume the five values
-from `FlowMatchChunkEnv.step`; `ChunkEnvAdapter` exposes them as a `StepResult`.
+`policies/flowmatch/`. BC construction and weight loading live in `loader.py`.
+DSRL, RFS and RoboFFT use `FlowMatchRLRuntime` and collect action chunks
+through `FlowMatchChunkEnv.step`. BORA's online collector steps the simulator once per joint
+target to record the executed command, observation and intervention events.
 
 ## Validation
 
@@ -62,7 +63,7 @@ Run the lightweight contract suite with:
 python -m unittest discover -s tests -v
 ~~~
 
-CPU CI runs this suite, checks dependencies, compiles the sources and invokes all eight method entry points with `--help`. When compatible BC weights and simulator assets are available, run a one-update smoke test for each method. Record missing inputs and report each unrun integration check explicitly.
+CPU CI runs this suite, checks dependencies, compiles the sources and invokes all eight method entry points with `--help`. The simulation gate requires a pretrained FlowMatch BC checkpoint and matching task assets. For each method, verify a real rollout and parameter update, restore the resulting training snapshot, and complete a paired evaluation on a saved test seed. BORA also needs a matching demonstration for its offline updates and a complete online episode for residual training.
 
 ## Execution and data ownership
 
@@ -79,8 +80,9 @@ The method selects one batch element for the simulation environment. ChunkEnvAda
 forwards the physical chunk, reports the actual control frames from info.steps,
 and borrows the context-managed environment. Its owner closes the simulator.
 
-Data handling includes demonstration episodes, BORA frame sampling and DSRL
-transition replay. An algorithm owns parameter updates. A policy produces
-predictions. A method owns data collection and training stages and explicitly
-constructs its dependencies. A temporal ActionCodec encodes and decodes action
-sequences. A MotionPrior models actions or latent codes conditioned on history.
+BORA reads joint-action HDF5 demonstrations directly. Each action uses its
+pre-step observation. Replay ends at the first true `done`, even when the
+recorder kept later frames. A timeout with no terminal step needs one more
+observation for the value target. BORA's online collector saves that final
+observation. Snapshots reference the original HDF5 files, so a temporary
+directory of selection symlinks can be removed after training.

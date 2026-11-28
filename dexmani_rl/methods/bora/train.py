@@ -46,7 +46,7 @@ def main(correction=None, confirm_recovery=None):
     if saved is None:
         test_seeds, _, excluded = seed_split(task)
         demo_dir = args.demonstrations or DATA_DIR / 'episodes' / task / 'succeeded_episode'
-        demo_files = sorted(Path(demo_dir).resolve().glob('episode_*.h5'))
+        demo_files = sorted(demo_dir.glob('episode_*.h5'))
         online_files = []
     else:
         test_seeds, excluded = saved['test_seeds'], set(saved['excluded_seeds'])
@@ -79,7 +79,7 @@ def main(correction=None, confirm_recovery=None):
             cwd=Path(__file__).resolve().parent, capture_output=True, text=True, check=False).stdout.strip()
     metadata = {'algorithm': 'bora', 'config': cfg, 'base_checkpoint': checkpoint, 'weights': weights,
                 'git_revision': version or None, 'torch': str(torch.__version__), 'test_seeds': test_seeds,
-                'excluded_seeds': sorted(excluded), 'demo_files': [str(p) for p in demo_files]}
+                'excluded_seeds': sorted(excluded), 'demo_files': [str(p) for p in offline.paths]}
     (output / 'config.json').write_text(json.dumps(dict(metadata, policy_config=bc_cfg,
         resumed_from=args.resume, correction_enabled=correction is not None,
         recovery_confirmation_enabled=confirm_recovery is not None), indent=2))

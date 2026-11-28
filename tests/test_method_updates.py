@@ -22,9 +22,10 @@ class Velocity(nn.Linear):
 
 
 class TrainablePolicy(FakeFlowMatchPolicy):
-    def __init__(self):
+    def __init__(self, state_dim=3):
         super().__init__()
-        self.obs_encoder = nn.Linear(3, 5)
+        self.normalization_dims = {'joint_state': state_dim}
+        self.obs_encoder = nn.Linear(state_dim, 5)
         self.obs_encoder.out_dim = 5
         self.obs_encoder.rgb_encoder = nn.Module()
         self.obs_encoder.rgb_encoder.backbone = nn.Identity()

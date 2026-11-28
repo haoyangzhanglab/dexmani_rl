@@ -40,11 +40,14 @@ class FrameReplay:
                     episode['action'].shape != (len(done), self.policy.action_dim)):
                 raise ValueError(f'Invalid action or termination shape: {path}')
             terminal = np.flatnonzero(done)
-            length = int(terminal[0]) + 1 if len(terminal) else len(done)
-            if not len(terminal) and not episode.attrs['truncated']:
+            if terminal.size:
+                length = int(terminal[0]) + 1
+                needed = length
+            elif episode.attrs['truncated']:
+                length = len(done)
+                needed = length + 1  # Bootstrap from the observation after the final action.
+            else:
                 raise ValueError(f'Missing episode end: {path}')
-            # Only timeouts bootstrap from a post-step observation.
-            needed = length + int(not len(terminal))
             for key in self.policy.normalization_dims:
                 if key != 'action' and len(episode[key]) < needed:
                     raise ValueError(f'Missing observation for {key} at episode boundary: {path}')
