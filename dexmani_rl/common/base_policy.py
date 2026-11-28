@@ -62,14 +62,14 @@ class FrozenPolicy:
         self.action_decoder = FlowMatchActionDecoder(
             policy, cfg['eval']['inference_steps'], decode_batch=decode_batch)
         self.action_transform = JointActionTransform(
-            policy.normalizer['action'], limits,
+            policy.normalizer['action'], torch.as_tensor(limits, device=self.device),
             action_dim=policy.action_dim,
             execute_steps=policy.n_action_steps,
         )
         self.state_dim = self.observation_encoder.state_dim
         self.noise_dim = self.observation_encoder.noise_dim
         self.action_dim = policy.n_action_steps * policy.action_dim
-        self.limits = self.action_transform.limits.to(self.device)
+        self.limits = self.action_transform.limits
 
     @torch.no_grad()
     def encode(self, obs):

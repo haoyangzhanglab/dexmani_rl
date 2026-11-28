@@ -61,4 +61,23 @@ Run the lightweight contract suite with:
 python -m unittest discover -s tests -v
 ~~~
 
-The contract suite does not replace simulator integration tests. Before merging a refactor, run a one-update smoke test for DSRL, RFS, RoboFFT, and BORA in the pinned dexmani_sim environment, then compare their paired-seed evaluation against the pre-refactor baseline.
+The contract suite does not replace simulator integration tests. When compatible BC weights and simulator assets are available, run a one-update smoke test for each method. Record missing inputs and report each unrun integration check explicitly.
+
+## Execution and data ownership
+
+FlowMatch returns a batch of executable joint positions in radians with shape
+`[B, execute_steps, action_dim]`. The prediction horizon describes the full
+model sample. The decoder removes observation history before selecting the
+future window. RoboFFT keeps the full sample for matching and selects the
+execution window starting at `n_obs_steps - 1`. BORA evaluates the clamped
+physical target after mapping it back to the critic's normalized coordinates.
+
+The method selects one batch element for the legacy environment. ChunkEnvAdapter
+forwards the physical chunk, reports the actual control frames from info.steps,
+and borrows the context-managed environment. Its owner closes the simulator.
+
+Data handling includes demonstration episodes, BORA frame sampling and DSRL
+transition replay. An algorithm owns parameter updates. A policy produces
+predictions. A method owns data collection and training stages and explicitly
+constructs its dependencies. A temporal ActionCodec encodes and decodes action
+sequences. A MotionPrior models actions or latent codes conditioned on history.

@@ -1,5 +1,8 @@
 """Generic inference adapter for the repository's FlowMatch policy runtime."""
 
+from dataclasses import replace
+from math import isclose
+
 import torch
 
 from ...core.contracts import PolicyOutput
@@ -23,6 +26,14 @@ class FlowMatchPolicyAdapter:
             execute_steps=policy.n_action_steps,
             control_dt=base.cfg.get("control_dt_s"),
         )
+        if any((part.kind, part.unit) != ("joint_position", "rad") for part in self._action_spec.segments):
+            raise ValueError("FlowMatch outputs joint positions in radians")
+        dt = base.cfg.get("control_dt_s")
+        if dt is not None:
+            if self._action_spec.control_dt is None:
+                self._action_spec = replace(self._action_spec, control_dt=dt)
+            elif not isclose(self._action_spec.control_dt, dt, rel_tol=1e-6):
+                raise ValueError("ActionSpec control period differs from checkpoint")
         if self._action_spec.action_dim != policy.action_dim:
             raise ValueError("ActionSpec dimension must match the FlowMatch policy action dimension")
         if self._action_spec.horizon != policy.horizon:

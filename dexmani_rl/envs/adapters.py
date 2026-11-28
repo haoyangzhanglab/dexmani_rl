@@ -26,7 +26,7 @@ class ChunkEnvAdapter:
             reward=float(reward),
             terminated=bool(terminated),
             truncated=bool(truncated),
-            executed_steps=int(info.get("steps", 1)),
+            executed_steps=info["steps"],
             info=info,
         )
 

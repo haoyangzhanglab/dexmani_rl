@@ -54,11 +54,17 @@ class FakeFlowMatchPolicy(torch.nn.Module):
 
 
 class FakeLegacyEnv:
+    def __init__(self, terminated=False):
+        self.terminated = terminated
+
+    def close(self):
+        raise AssertionError("Borrowed environment closed twice")
+
     def reset(self, seed):
         return {"seed": seed}
 
     def step(self, action):
-        return {"obs": action}, 1.0, False, True, {"steps": 3, "source": "fake"}
+        return {"obs": action}, 1.0, self.terminated, not self.terminated, {"steps": 3, "source": "fake"}
 
 
 class ArchitectureContractTests(unittest.TestCase):
@@ -83,20 +89,46 @@ class ArchitectureContractTests(unittest.TestCase):
             ActionSpec((ActionSegment("arm", 7),), horizon=4, execute_steps=5)
 
     def test_core_import_does_not_load_policy_backends(self):
-        code = (
-            "import sys; import dexmani_rl.core; "
-            "assert 'torch' not in sys.modules; "
-            "assert 'dexmani_rl.policy.flowmatch' not in sys.modules"
-        )
+        code = """
+import sys
+sys.modules['dexmani_rl.policies.flowmatch'] = None
+sys.modules['dexmani_rl.policy'] = None
+from dexmani_rl.core import ActionSegment, ActionSpec, PolicyOutput
+import dexmani_rl.envs.adapters
+import dexmani_rl.policies
+
+class IndependentPolicy:
+    action_spec = ActionSpec((ActionSegment('hand', 1, 'latent', 'normalized'),))
+    def predict(self, observation):
+        return PolicyOutput(action=[observation])
+
+assert IndependentPolicy().predict(3).action == [3]
+assert not {'torch', 'torchvision', 'transformers', 'timm', 'dexmani_sim'}.intersection(sys.modules)
+"""
+        subprocess.run([sys.executable, "-S", "-c", code], check=True)
+
+    def test_method_imports(self):
+        code = """
+import sys
+import dexmani_rl.policies.flowmatch.adapter
+from dexmani_rl.common.base_policy import executable_actions
+import dexmani_rl.dsrl, dexmani_rl.rfs, dexmani_rl.robofft, dexmani_rl.bora
+import dexmani_rl.train_dsrl, dexmani_rl.train_rfs, dexmani_rl.train_robofft, dexmani_rl.train_bora
+assert not {'dexmani_rl.policy.flowmatch', 'torchvision', 'transformers', 'timm', 'dexmani_sim'}.intersection(sys.modules)
+"""
         subprocess.run([sys.executable, "-c", code], check=True)
 
-    def test_common_runtime_keeps_flowmatch_model_import_lazy(self):
-        code = (
-            "import sys; import dexmani_rl.common.base_policy; "
-            "assert 'dexmani_rl.policy.flowmatch' not in sys.modules; "
-            "assert 'transformers' not in sys.modules"
-        )
-        subprocess.run([sys.executable, "-c", code], check=True)
+    def test_action_dimensions_and_period(self):
+        for width in (19, 32):
+            spec = ActionSpec((ActionSegment('code', width, 'latent'),), horizon=8, execute_steps=3)
+            values = torch.arange(width)
+            torch.testing.assert_close(spec.split(values)['code'], values)
+        for dim in (0, -1, True):
+            with self.assertRaises(ValueError):
+                ActionSegment('code', dim)
+        for dt in (0, -1, float('nan'), float('inf')):
+            with self.assertRaises(ValueError):
+                ActionSpec((ActionSegment('joint', 2),), control_dt=dt)
 
     def test_step_result_reports_episode_boundary(self):
         result = StepResult({}, 1.0, False, True, 2, {})
@@ -110,9 +142,14 @@ class ArchitectureContractTests(unittest.TestCase):
         result = adapter.step(torch.zeros(1))
         self.assertEqual(result.observation, {"obs": torch.zeros(1)})
         self.assertEqual(result.reward, 1.0)
+        self.assertEqual(result.info, {"steps": 3, "source": "fake"})
+        self.assertFalse(result.terminated)
         self.assertTrue(result.truncated)
         self.assertEqual(result.executed_steps, 3)
         adapter.close()
+        terminal = ChunkEnvAdapter(FakeLegacyEnv(terminated=True)).step([1, 2, 3])
+        self.assertTrue(terminal.terminated)
+        self.assertFalse(terminal.truncated)
 
     def test_flowmatch_dimensions_are_derived_from_checkpoint_shape(self):
         policy = FakeFlowMatchPolicy()
@@ -130,6 +167,9 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(normalized.shape, (2, 6))
         self.assertTrue(torch.all(normalized <= 0.5))
         adapter = FlowMatchPolicyAdapter(base)
+        for kind, unit, dt in [('latent', 'normalized', .05), ('joint_position', 'rad', .02)]:
+            with self.assertRaises(ValueError):
+                FlowMatchPolicyAdapter(base, ActionSpec((ActionSegment('joint', 3, kind, unit),), 4, 2, dt))
         output = adapter.predict(obs, noise=noise)
         self.assertEqual(output.action.shape, (2, 2, 3))
         self.assertEqual(output.features.shape, (2, 16))

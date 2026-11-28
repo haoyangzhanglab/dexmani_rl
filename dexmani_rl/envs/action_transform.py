@@ -9,19 +9,16 @@ def _limits_tensor(limits: Any, *, device: torch.device, dtype: torch.dtype, act
     value = torch.as_tensor(limits, device=device, dtype=dtype)
     if value.shape != (action_dim, 2):
         raise ValueError(f"Expected joint limits [{action_dim}, 2], got {tuple(value.shape)}")
-    if not torch.isfinite(value).all() or not (value[:, 0] < value[:, 1]).all():
-        raise ValueError("Joint limits must be finite with lower < upper")
+    if not torch.isfinite(value).all() or not (value[:, 0] <= value[:, 1]).all():
+        raise ValueError("Joint limits must be finite with lower <= upper")
     return value
 
 
 def joint_targets(window: torch.Tensor, normalizer: Any, limits: Any) -> tuple[torch.Tensor, torch.Tensor]:
     """Return requested and limit-clamped physical joint targets."""
     requested = normalizer.unnormalize(window)
-    bounds = _limits_tensor(
-        limits, device=requested.device, dtype=requested.dtype,
-        action_dim=requested.shape[-1],
-    )
-    executable = torch.maximum(torch.minimum(requested, bounds[:, 1]), bounds[:, 0])
+    bounds = torch.as_tensor(limits, device=requested.device)
+    executable = requested.clamp(bounds[:, 0], bounds[:, 1])
     return requested, executable
 
 
@@ -43,7 +40,7 @@ class JointActionTransform:
         self.action_dim = action_dim
         self.execute_steps = execute_steps
         self.limits = _limits_tensor(
-            limits, device=torch.device("cpu"), dtype=torch.float32,
+            limits, device=torch.as_tensor(limits).device, dtype=torch.float32,
             action_dim=action_dim,
         )
 
@@ -51,7 +48,7 @@ class JointActionTransform:
         requested, executable = joint_targets(window, self.normalizer, self.limits)
         normalized = self.normalizer.normalize(executable).flatten(1)
         if return_clip_fraction:
-            return normalized, (requested != executable).to(window.dtype).mean()
+            return normalized, (requested != executable).float().mean()
         return normalized
 
     def physical(self, normalized_actions: torch.Tensor) -> torch.Tensor:

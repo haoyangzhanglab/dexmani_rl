@@ -32,8 +32,8 @@ class FlowMatchObservationEncoder:
 class FlowMatchActionDecoder:
     """Decode latent noise into the executable prefix of a FlowMatch action chunk."""
 
-    def __init__(self, policy, inference_steps: int, decode_batch: int = 64) -> None:
-        if type(inference_steps) is not int or inference_steps <= 0:
+    def __init__(self, policy, inference_steps: int | None, decode_batch: int = 64) -> None:
+        if inference_steps is not None and (type(inference_steps) is not int or inference_steps <= 0):
             raise ValueError("inference_steps must be a positive integer")
         if type(decode_batch) is not int or decode_batch <= 0:
             raise ValueError("decode_batch must be a positive integer")
@@ -44,8 +44,8 @@ class FlowMatchActionDecoder:
     @torch.no_grad()
     def decode(self, context, noise):
         expected = self.policy.horizon * self.policy.action_dim
-        if noise.ndim != 2 or noise.shape != (len(context), expected):
-            raise ValueError(f"Expected flattened FlowMatch noise [B, {expected}], got {tuple(noise.shape)}")
+        if noise.shape not in ((len(context), expected), (len(context), self.policy.horizon, self.policy.action_dim)):
+            raise ValueError(f"Expected full-horizon FlowMatch noise with {expected} values per sample, got {tuple(noise.shape)}")
         chunks = []
         for context_batch, noise_batch in zip(context.split(self.decode_batch), noise.split(self.decode_batch)):
             initial_noise = noise_batch.reshape(-1, self.policy.horizon, self.policy.action_dim)
