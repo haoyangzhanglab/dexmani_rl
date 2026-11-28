@@ -1,6 +1,6 @@
 # DexMani RL 研究指南
 
-本仓库研究灵巧手 FlowMatch 策略的后训练。默认用中文说明，技术术语和标识符沿用原名。环境与运行命令见 README.md，实验配方见 configs/。
+本仓库研究灵巧手 FlowMatch 策略的后训练。默认用中文说明，技术术语和标识符沿用原名。环境与运行命令见 README.md，实验配方见 configs/methods/。
 
 ## 论文研究与实验证据
 
@@ -24,7 +24,7 @@
 - 不新增全局策略注册表、通用 BaseTrainer 或通用 BaseRLAgent。
 - 动作维度、动作分段和时间窗口从 ActionSpec 或 checkpoint 配置取得，不在训练器中硬编码机器人自由度。
 - 可选模型后端必须延迟导入其专属依赖。移除一个策略时，不应导致其他策略或 core 无法导入。
-- 保留 FrozenPolicy 等兼容门面，分阶段迁移调用方；不要为了目录整齐一次性搬迁所有算法。
+- 现有方法显式使用 FlowMatch 后端。每个方法拥有自己的训练和评估入口，方法之间禁止相互导入。
 - Temporal Action Codec 与 History-conditioned Motion Prior 是不同概念；在各自有真实实现时分别定义接口，不要合并成万能 Latent 模块。
 - 架构约定和验证方式见 docs/architecture.md。
 

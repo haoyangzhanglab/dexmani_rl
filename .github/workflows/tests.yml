@@ -35,9 +35,9 @@ jobs:
           python -c "import dexmani_rl.core"
           python -c "import dexmani_rl.policies"
           python -c "import dexmani_rl.envs.adapters"
-      - name: Check training entry points
+      - name: Check method entry points
         run: |
-          python -m dexmani_rl.train_dsrl --help
-          python -m dexmani_rl.train_rfs --help
-          python -m dexmani_rl.train_robofft --help
-          python -m dexmani_rl.train_bora --help
+          for method in dsrl rfs robofft bora; do
+            python -m "dexmani_rl.methods.${method}.train" --help
+            python -m "dexmani_rl.methods.${method}.evaluate" --help
+          done

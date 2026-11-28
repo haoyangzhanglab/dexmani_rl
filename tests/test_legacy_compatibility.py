@@ -4,9 +4,8 @@ import unittest
 
 import torch
 
-from dexmani_rl import bora
-from dexmani_rl.common import base_policy
-from dexmani_rl.common.base_policy import FrozenPolicy
+from dexmani_rl.methods.bora import algorithm as bora
+from dexmani_rl.policies.flowmatch.rl_runtime import FlowMatchRLRuntime
 from dexmani_rl.envs.action_transform import executable_actions as critic_actions
 from tests.flowmatch_fixtures import FakeFlowMatchPolicy
 
@@ -29,7 +28,7 @@ def executable_actions(window, normalizer, limits):
     return normalizer.normalize(applied)
 
 
-class OriginalFrozenPolicy:
+class ReferenceRuntime:
     def __init__(self, policy, cfg, limits, decode_batch=64):
         self.policy, self.cfg, self.decode_batch = policy, cfg, decode_batch
         self.device = next(policy.parameters()).device
@@ -63,7 +62,7 @@ class OriginalFrozenPolicy:
         return actions
 
     @torch.no_grad()
-    def robofft_actions(self, normalized):
+    def physical_execution_window(self, normalized):
         """Convert the execution window without changing the full matching sample."""
         start = self.policy.n_obs_steps - 1
         window = normalized[:, start:start + self.policy.n_action_steps]
@@ -108,8 +107,8 @@ class LegacyCompatibilityTests(unittest.TestCase):
         limits = torch.tensor([[-0.5, 1], [-1, 0.75], [0, 0]])
         for steps in (None, 2):
             cfg = {'eval': {'inference_steps': steps}}
-            old = OriginalFrozenPolicy(policy, cfg, limits, decode_batch=2)
-            new = FrozenPolicy(policy, cfg, limits, decode_batch=2)
+            old = ReferenceRuntime(policy, cfg, limits, decode_batch=2)
+            new = FlowMatchRLRuntime(policy, cfg, limits, decode_batch=2)
             self.assertEqual((new.state_dim, new.noise_dim, new.action_dim),
                              (old.state_dim, old.noise_dim, old.action_dim))
             context, state = old.encode(obs)
@@ -121,11 +120,10 @@ class LegacyCompatibilityTests(unittest.TestCase):
                                                old.actions(*args, return_clip_fraction=True))
             torch.testing.assert_close(new.physical(residual), old.physical(residual))
             torch.testing.assert_close(new.bounded_physical(noise), old.bounded_physical(noise))
-            torch.testing.assert_close(new.robofft_actions(noise), old.robofft_actions(noise))
+            torch.testing.assert_close(new.physical_execution_window(noise), old.physical_execution_window(noise))
 
     def test_bora_action_transform_ownership(self):
         self.assertIs(bora.executable_actions, critic_actions)
-        self.assertFalse(hasattr(base_policy, "executable_actions"))
 
     def test_critic_coordinates_and_boundary_gradient(self):
         field = Affine()

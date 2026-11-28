@@ -5,7 +5,7 @@
 - Keep the shared kernel small and independent of any paper or robot.
 - Keep each policy backend and each paper method in its own module.
 - Describe action dimensions and semantics with data, not constants in trainers.
-- Preserve the current training entry points while migrating behind compatibility facades.
+- Each method owns its training and evaluation entry points.
 - Make optional model dependencies lazy so removing one backend does not break imports of another.
 
 ## Dependency direction
@@ -35,24 +35,24 @@ The core package must not import a policy, algorithm, simulator, or dataset impl
 4. Add tests for output shape, action semantics, and checkpoint loading.
 5. Add a method only if the policy needs a distinct training procedure.
 
-Do not modify existing policy adapters, RL algorithms, or the shared evaluator merely to register a new model. Methods construct the selected backend explicitly.
+Do not modify existing policy adapters or algorithms merely to register a new model. Methods construct the selected backend explicitly.
 
 ## Adding a method
 
 Give the paper its own methods/<method>/ package, configuration, and entry point. It may compose a policy adapter, one or more algorithms, representations, data sources, and an environment adapter. Keep paper-specific losses, schedules, and training stages inside that method.
 
-Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and generative-policy matching have materially different update lifecycles. The current evaluate.py remains the compatibility evaluator for the four existing methods; a new method should own its evaluation entry point or use a genuinely generic adapter evaluator rather than adding method-specific branches to the legacy file.
+Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and generative-policy matching have materially different update lifecycles. Methods own rollout and actor loading. Shared evaluation metrics operate on paired results.
 
 ## Removing a method or policy
 
-A method owns its configuration and imports. Remove its package, configuration, and entry point together. Shared code must not import method packages. A policy backend can be removed with its adapter and optional dependencies as long as no method explicitly selects it. Fresh Python processes verify lightweight imports of Core, policies and environment adapters, and exercise a separate policy fixture with both FlowMatch import paths blocked. These checks run using only the source tree and standard library.
+A method owns its configuration and imports. Remove its package, configuration, and entry point together. Shared code must not import concrete methods. The isolation suite blocks each method in turn and runs the other three methods’ import, configuration and CPU update checks. A policy backend can be removed with its adapter and optional dependencies as long as no method explicitly selects it. Fresh Python processes verify lightweight imports of Core, policies and environment adapters, and exercise a separate policy fixture with the FlowMatch package blocked. These checks run using only the source tree and standard library.
 
 ## FlowMatch runtime
 
-The network lives in `policy/`. The runtime and inference adapter live in
-`policies/flowmatch/`. Training and evaluation use `FrozenPolicy` for observation
+The network lives in `policies/flowmatch/model/`. The runtime and inference adapter live in
+`policies/flowmatch/`. BC construction and weight loading live in `loader.py`. Training and evaluation use `FlowMatchRLRuntime` for observation
 encoding, decoding and joint limits. Training scripts consume the five values
-from `ChunkEnv.step`; `ChunkEnvAdapter` exposes them as a `StepResult`.
+from `FlowMatchChunkEnv.step`; `ChunkEnvAdapter` exposes them as a `StepResult`.
 
 ## Validation
 
@@ -62,7 +62,7 @@ Run the lightweight contract suite with:
 python -m unittest discover -s tests -v
 ~~~
 
-CPU CI runs this suite, checks dependencies, compiles the sources and invokes all four training entry points with `--help`. When compatible BC weights and simulator assets are available, run a one-update smoke test for each method. Record missing inputs and report each unrun integration check explicitly.
+CPU CI runs this suite, checks dependencies, compiles the sources and invokes all eight method entry points with `--help`. When compatible BC weights and simulator assets are available, run a one-update smoke test for each method. Record missing inputs and report each unrun integration check explicitly.
 
 ## Execution and data ownership
 
@@ -75,7 +75,7 @@ uses `JointActionTransform` to bound physical targets. Its critic uses
 `envs.action_transform.executable_actions` and the same limits to express
 both the base and corrected commands in normalized coordinates.
 
-The method selects one batch element for the legacy environment. ChunkEnvAdapter
+The method selects one batch element for the simulation environment. ChunkEnvAdapter
 forwards the physical chunk, reports the actual control frames from info.steps,
 and borrows the context-managed environment. Its owner closes the simulator.
 
