@@ -4,10 +4,10 @@ import unittest
 
 import torch
 
+from dexmani_rl.common.base_policy import FrozenPolicy, policy_dimensions
 from dexmani_rl.core.contracts import StepResult
 from dexmani_rl.core.specs import ActionSegment, ActionSpec
 from dexmani_rl.envs.adapters import ChunkEnvAdapter
-from dexmani_rl.common.base_policy import FrozenPolicy, policy_dimensions
 from dexmani_rl.policies.flowmatch.adapter import FlowMatchPolicyAdapter
 from tests.flowmatch_fixtures import FakeFlowMatchPolicy
 
@@ -60,19 +60,19 @@ assert not {'torch', 'torchvision', 'transformers', 'timm', 'dexmani_sim'}.inter
 """
         subprocess.run([sys.executable, "-E", "-S", "-c", code], check=True)
 
-    def test_legacy_joint_helpers_without_flowmatch(self):
+    def test_bora_critic_actions_without_policy_modules(self):
         code = """
 import sys
 sys.modules['dexmani_rl.policies.flowmatch'] = None
 sys.modules['dexmani_rl.policy'] = None
+sys.modules['dexmani_rl.common.base_policy'] = None
 import torch
-from dexmani_rl.envs.action_transform import joint_targets, executable_actions
+from dexmani_rl.bora import executable_actions
 from tests.flowmatch_fixtures import IdentityField
 field = IdentityField()
 window = torch.tensor([[[2., -0.5]]])
 limits = torch.tensor([[-1., 1.], [-1., 1.]])
 expected = torch.tensor([[[1., -0.5]]])
-torch.testing.assert_close(joint_targets(window, field, limits), (window, expected))
 torch.testing.assert_close(executable_actions(window, field, limits), expected)
 """
         subprocess.run([sys.executable, "-c", code], check=True)

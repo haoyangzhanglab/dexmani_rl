@@ -51,7 +51,10 @@ class FrozenPolicy:
     """Encode observations and execute FlowMatch windows within robot joint limits."""
 
     def __init__(self, policy, cfg, limits, decode_batch=64):
-        from ..policies.flowmatch.runtime import FlowMatchActionDecoder, FlowMatchObservationEncoder
+        from ..policies.flowmatch.runtime import (
+            FlowMatchActionDecoder,
+            FlowMatchObservationEncoder,
+        )
 
         self.policy, self.cfg = policy, cfg
         self.device = next(policy.parameters()).device
@@ -64,7 +67,6 @@ class FrozenPolicy:
             execute_steps=policy.n_action_steps,
         )
         self.state_dim, self.noise_dim, self.action_dim = policy_dimensions(policy)
-        self.limits = self.action_transform.limits
 
     def encode(self, obs):
         return self.observation_encoder.encode(obs)
@@ -82,7 +84,7 @@ class FrozenPolicy:
         """Convert RoboFFT's execution window without changing its matching sample."""
         start = self.policy.n_obs_steps - 1
         window = normalized[:, start:start + self.policy.n_action_steps]
-        physical, clipped = joint_targets(window, self.policy.normalizer['action'], self.limits)
+        physical, clipped = joint_targets(window, self.action_transform.normalizer, self.action_transform.limits)
         return clipped, (physical != clipped).float().mean()
 
     def bounded_physical(self, window):

@@ -9,10 +9,11 @@ import torch
 
 from .bora import BORA
 from .bora_data import FrameReplay, collect_episode
-from .common.base_policy import FrozenPolicy, load_policy
+from .common.base_policy import load_policy
 from .common.checkpoint import capture_rng, restore_rng, save
 from .common.env import make_env, seed_split
 from .common.training import training_arguments
+from .envs.action_transform import JointActionTransform
 
 
 def main(correction=None, confirm_recovery=None):
@@ -107,10 +108,13 @@ def main(correction=None, confirm_recovery=None):
                 continue
             path = output / 'online' / f'episode_{episodes:03}_{seed}.h5'
             with make_env(policy, bc_cfg) as env:
-                base = FrozenPolicy(policy, bc_cfg, env.env.robot.qlimits)
+                transform = JointActionTransform(
+                    policy.normalizer['action'], torch.as_tensor(env.env.robot.qlimits, device=device),
+                    action_dim=policy.action_dim, execute_steps=policy.n_action_steps,
+                )
 
-                def act(obs, base=base):
-                    return base.bounded_physical(agent.actor.normalized_actions(obs))[0]
+                def act(obs, transform=transform):
+                    return transform.bounded_physical(agent.actor.normalized_actions(obs))[0]
 
                 try:
                     rollout = collect_episode(env, seed, act, path, rewards, correction=correction,
@@ -123,7 +127,7 @@ def main(correction=None, confirm_recovery=None):
             first_update = (episodes % cfg['episodes_per_round']) * cfg['updates_per_episode']
             for step in range(first_update, first_update + cfg['updates_per_episode']):
                 batch = offline.sample(cfg['online_batch_size'], rng, online=online)
-                metrics = agent.online_update(batch, step=step, joint_limits=base.limits)
+                metrics = agent.online_update(batch, step=step, joint_limits=transform.limits)
                 record(phase='online', round=round_number, round_update=step + 1, **metrics)
             episodes += 1
             if episodes < through * cfg['episodes_per_round']:

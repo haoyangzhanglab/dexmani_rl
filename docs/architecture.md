@@ -45,7 +45,7 @@ Do not create a universal BaseTrainer or BaseRLAgent. PPO, SAC, TD3, DAgger, and
 
 ## Removing a method or policy
 
-A method owns its configuration and imports. Remove its package, configuration, and entry point together. Shared code must not import method packages. A policy backend can be removed with its adapter and optional dependencies as long as no method explicitly selects it. This is enforced by lazy backend imports and dependency-direction tests/review.
+A method owns its configuration and imports. Remove its package, configuration, and entry point together. Shared code must not import method packages. A policy backend can be removed with its adapter and optional dependencies as long as no method explicitly selects it. Fresh Python processes verify lightweight imports of Core, policies and environment adapters, and exercise a separate policy fixture with both FlowMatch import paths blocked. These checks run using only the source tree and standard library.
 
 ## FlowMatch runtime
 
@@ -62,7 +62,7 @@ Run the lightweight contract suite with:
 python -m unittest discover -s tests -v
 ~~~
 
-The contract suite does not replace simulator integration tests. When compatible BC weights and simulator assets are available, run a one-update smoke test for each method. Record missing inputs and report each unrun integration check explicitly.
+CPU CI runs this suite, checks dependencies, compiles the sources and invokes all four training entry points with `--help`. When compatible BC weights and simulator assets are available, run a one-update smoke test for each method. Record missing inputs and report each unrun integration check explicitly.
 
 ## Execution and data ownership
 
@@ -70,8 +70,10 @@ FlowMatchPolicyAdapter returns a batch of executable joint positions in radians 
 `[B, execute_steps, action_dim]`. The prediction horizon describes the full
 model sample. The decoder removes observation history before selecting the
 future window. RoboFFT keeps the full sample for matching and selects the
-execution window starting at `n_obs_steps - 1`. BORA evaluates the clamped
-physical target after mapping it back to the critic's normalized coordinates.
+execution window starting at `n_obs_steps - 1`. During online collection BORA
+uses `JointActionTransform` to bound physical targets. Its critic uses
+`envs.action_transform.executable_actions` and the same limits to express
+both the base and corrected commands in normalized coordinates.
 
 The method selects one batch element for the legacy environment. ChunkEnvAdapter
 forwards the physical chunk, reports the actual control frames from info.steps,
